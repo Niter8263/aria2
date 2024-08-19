@@ -45,8 +45,6 @@ DATE_TIME() {
 }
 
 GET_TRACKERS() {
-    sudo service aria2c stop 
-    sed -i "s@^\(bt-tracker=\).*@\1${TRACKER}@" ${ARIA2_CONF} && echo -e "$(DATE_TIME) ${INFO} 服务停止成功 !"
     if [[ -z "${CUSTOM_TRACKER_URL}" ]]; then
         echo && echo -e "$(DATE_TIME) ${INFO} Get BT trackers..."
         TRACKER=$(
@@ -152,6 +150,4 @@ else
     ECHO_TRACKERS
     ADD_TRACKERS
 fi
-        sudo service aria2c start 
-        sed -i "s@^\(bt-tracker=\).*@\1${TRACKER}@" ${ARIA2_CONF} && echo -e "$(DATE_TIME) ${INFO} 服务启动成功 !"
 exit 0
