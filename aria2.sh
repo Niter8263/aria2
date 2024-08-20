@@ -243,7 +243,7 @@ Start_auto() {
     sudo update-rc.d aria2c defaults
     echo -e "${Info} 打开自启服务成功..."
     sudo service aria2c start
-    auto="1"
+    export auto="1"
 }
 
 Start_aria2() {
@@ -729,7 +729,7 @@ if [[ -e ${aria2c} ]]; then
         echo -e " Aria2开机启动: ${Green_font_prefix}已开启${Font_color_suffix}"
     else
         echo
-        echo -e " Aria2开机启动 BT-Tracker: ${Red_font_prefix}未开启${Font_color_suffix}"
+        echo -e " Aria2开机启动  ${Red_font_prefix}未开启${Font_color_suffix}"
     fi
 else
     echo -e " Aria2 状态: ${Red_font_prefix}未安装${Font_color_suffix}"
