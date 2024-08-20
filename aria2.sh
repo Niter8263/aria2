@@ -723,6 +723,10 @@ if [[ -e ${aria2c} ]]; then
         echo
         echo -e " 自动更新 BT-Tracker: ${Red_font_prefix}未开启${Font_color_suffix}"
     fi
+     if [[ -n $(Start_auto) ]]; then
+        echo
+        echo -e " Aria2开机自启服务: ${Green_font_prefix}已开启${Font_color_suffix}"
+    fi
 else
     echo -e " Aria2 状态: ${Red_font_prefix}未安装${Font_color_suffix}"
 fi
