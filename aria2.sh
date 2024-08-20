@@ -270,7 +270,6 @@ Start_auto_stop(){
         echo -e "${Info} 删除开机自启服务..."
         sudo update-rc.d -f aria2c remove
         echo -e "${Info} 取消自启服务成功..."
-        sudo service aria2c stop
 }
 Start_aria2() {
     check_installed_status
