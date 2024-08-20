@@ -238,13 +238,40 @@ Install_aria2() {
 
 Start_auto() {
     check_installed_status
-    sudo chmod 755 /etc/init.d/aria2c
-    echo -e "${Info} 添加开机自启服务..."
-    sudo update-rc.d aria2c defaults
-    echo -e "${Info} 打开自启服务成功..."
-    sudo service aria2c start
+    eval $(systemctl show aria2c.service --property ActiveState)
+	if [ "$ActiveState" = "active" ]; then
+	 echo
+        echo -e " 是否关闭 ${Red_font_prefix}开机自启${Font_color_suffix} 功能？[y/N] \c"
+        read -e Start_auto_ny
+        [[ -z "${Start_auto_ny}" ]] && Start_auto_ny="n"
+        if [[ ${Start_auto_ny} == [Yy] ]]; then
+	echo
+        Start_auto_stop
+	fi
+     else
+	echo
+	echo -e " 是否开启 ${Red_font_prefix}开机自启${Font_color_suffix} 功能？[y/N] \c"
+        read -e Start_auto_ny
+        [[ -z "${Start_auto_ny}" ]] && Start_auto_ny="n"
+        if [[ ${Start_auto_ny} == [Yy] ]]; then
+	echo
+	Start_auto_open
+	fi
+	fi
 }
-
+Start_auto_open(){
+	sudo chmod 755 /etc/init.d/aria2c
+        echo -e "${Info} 添加开机自启服务..."
+        sudo update-rc.d aria2c defaults
+	echo -e "${Info} 打开自启服务成功..."
+        sudo service aria2c start
+}
+Start_auto_stop(){
+        echo -e "${Info} 删除开机自启服务..."
+        sudo update-rc.d -f aria2c remove
+        echo -e "${Info} 取消自启服务成功..."
+        sudo service aria2c stop
+}
 Start_aria2() {
     check_installed_status
     check_pid
@@ -735,7 +762,7 @@ else
     echo -e " Aria2 状态: ${Red_font_prefix}未安装${Font_color_suffix}"
 fi
 echo
-read -e -p " 请输入数字 [0-12]:" num
+read -e -p " 请输入数字 [0-13]:" num
 case "$num" in
 0)
     Update_Shell
