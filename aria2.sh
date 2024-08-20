@@ -231,6 +231,7 @@ Install_aria2() {
     mkdir -p ${download_path}
     echo -e "${Info} 开启Tracker自动更新中..."
     crontab_update_start
+    Update_bt_tracker
     echo -e "${Info} 所有步骤 安装完毕，开始启动..."
     Start_aria2
 }
