@@ -26,7 +26,7 @@
 ## 部署方法
 * 下载脚本
 ```
-wget -N -O aria2.sh https://3ii.cc/xBh && chmod +x aria2.sh
+wget -N -O aria2.sh https://goo.su/WmqPUe && chmod +x aria2.sh
 ```
 * 运行脚本
 ```
