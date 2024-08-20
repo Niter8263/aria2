@@ -708,7 +708,8 @@ echo && echo -e " Aria2 一键安装管理脚本 增强版 ${Red_font_prefix}[v$
  ${Green_font_prefix}12.${Font_color_suffix} 自动更新 BT-Tracker
  ———————————————————————
  ${Green_font_prefix}13.${Font_color_suffix} 开机自启服务
-                                                                                " && echo
+ ———————————————————————   
+ #" && echo
 if [[ -e ${aria2c} ]]; then
     check_pid
     if [[ ! -z "${PID}" ]]; then
@@ -726,6 +727,9 @@ if [[ -e ${aria2c} ]]; then
      if [[ -n $(Start_auto) ]]; then
         echo
         echo -e " Aria2开机自启服务: ${Green_font_prefix}已开启${Font_color_suffix}"
+     else
+        echo
+        echo -e " Aria2开机自启服务: ${Green_font_prefix}未开启${Font_color_suffix}"
     fi
 else
     echo -e " Aria2 状态: ${Red_font_prefix}未安装${Font_color_suffix}"
