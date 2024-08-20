@@ -1,4 +1,4 @@
-# Aria2 完美配置
+# Aria2 完美脚本
 
 [![LICENSE](https://img.shields.io/github/license/mashape/apistatus.svg?style=flat-square&label=License)](https://github.com/P3TERX/aria2.conf/blob/master/LICENSE)
 [![GitHub Stars](https://img.shields.io/github/stars/P3TERX/aria2.conf.svg?style=flat-square&label=Stars&logo=github)](https://github.com/P3TERX/aria2.conf/stargazers)
@@ -24,16 +24,10 @@
 * 更好的 PT 下载支持
 
 ## 部署方法
-
-**推荐使用以下项目部署以获得最佳使用体验**
-
-- [Aria2 Pro](https://github.com/P3TERX/docker-aria2-pro) (Docker)
-- [Aria2 一键安装管理脚本 增强版](https://github.com/P3TERX/aria2.sh) (GNU/Linux)
-
-## 进阶玩法
-
-* [OneDrive、Google Drive 等网盘离线下载](https://p3terx.com/archives/offline-download-of-onedrive-gdrive.html)
-* [百度网盘转存到 OneDrive 、Google Drive 等其他网盘](https://p3terx.com/archives/baidunetdisk-transfer-to-onedrive-and-google-drive.html)
+* 下载脚本
+wget -N git.io/aria2.sh && chmod +x aria2.sh
+* 运行脚本
+./aria2.sh
 
 ## 文件说明
 
