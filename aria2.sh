@@ -711,6 +711,7 @@ echo && echo -e " Aria2 一键安装管理脚本 增强版 ${Red_font_prefix}[v$
  ———————————————————————   " && echo
 if [[ -e ${aria2c} ]]; then
     check_pid
+    eval $(systemctl show aria2c.service --property ActiveState)
     if [[ ! -z "${PID}" ]]; then
         echo -e " Aria2 状态: ${Green_font_prefix}已安装${Font_color_suffix} | ${Green_font_prefix}已启动${Font_color_suffix}"
     else
@@ -722,6 +723,13 @@ if [[ -e ${aria2c} ]]; then
     else
         echo
         echo -e " 自动更新 BT-Tracker: ${Red_font_prefix}未开启${Font_color_suffix}"
+    fi
+     if [ "$ActiveState" = "active" ]; then
+	     echo
+         echo -e " Aria2开机自启: ${Green_font_prefix}已开启${Font_color_suffix}"
+    else
+	     echo
+         echo -e " Aria2开机自启: ${Green_font_prefix}未开启${Font_color_suffix}"
     fi
 else
     echo -e " Aria2 状态: ${Red_font_prefix}未安装${Font_color_suffix}"
