@@ -116,10 +116,10 @@ Download_aria2() {
         echo -e "${Info} 删除旧版 Aria2 二进制文件..."
         rm -vf $(which aria2c)
     done
-    DOWNLOAD_URL="https://github.moeyy.xyz/https://github.com/Niter8263/aria2/releases/download/${aria2_new_ver}/aria2-${aria2_new_ver%_*}-static-linux-${ARCH}.tar.gz"
+    DOWNLOAD_URL="https://github.com/Niter8263/aria2/releases/download/${aria2_new_ver}/aria2-${aria2_new_ver%_*}-static-linux-${ARCH}.tar.gz"
     {
         wget -t2 -T3 -O- "${DOWNLOAD_URL}" ||
-            wget -t2 -T3 -O- "https://mirror.ghproxy.com/${DOWNLOAD_URL}"
+            wget -t2 -T3 -O- "https://github.moeyy.xyz/${DOWNLOAD_URL}"
     } | tar -zx
     [[ ! -s "aria2c" ]] && echo -e "${Error} Aria2 下载失败 !" && exit 1
     [[ ${update_dl} = "update" ]] && rm -f "${aria2c}"
