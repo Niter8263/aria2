@@ -25,10 +25,28 @@
 
 ## 部署方法
 * 下载脚本
-wget -N git.io/aria2.sh && chmod +x aria2.sh
+```
+wget -N -O aria2.sh https://3ii.cc/xBh && chmod +x aria2.sh
+```
 * 运行脚本
+```
 ./aria2.sh
+```
+## 其他操作
 
+启动：`/etc/init.d/aria2 start` `|` `service aria2 start`
+
+停止：`/etc/init.d/aria2 stop` `|` `service aria2 stop`
+
+重启：`/etc/init.d/aria2 restart` `|` `service aria2 restart`
+
+查看状态：`/etc/init.d/aria2 status` `|` `service aria2 status`
+
+配置文件路径：`/root/.aria2c/aria2.conf` （配置文件有中文注释，若语言设置有问题会导致中文乱码）
+
+默认下载目录：`/root/downloads`
+
+RPC 密钥：随机生成，可使用选项`7. 修改 配置文件`自定义
 ## 文件说明
 
 > **TIPS:** 附加功能脚本需配合配置文件使用，仅适用于 GNU/Linux ，理论上 macOS 安装 GNU 工具套件可以使用。依赖：`bash`、`curl`、`findutils`、`jq`
