@@ -243,6 +243,7 @@ Start_auto() {
     sudo update-rc.d aria2c defaults
     echo -e "${Info} 打开自启服务成功..."
     sudo service aria2c start
+    auto=$10
 }
 
 Start_aria2() {
@@ -708,8 +709,7 @@ echo && echo -e " Aria2 一键安装管理脚本 增强版 ${Red_font_prefix}[v$
  ${Green_font_prefix}12.${Font_color_suffix} 自动更新 BT-Tracker
  ———————————————————————
  ${Green_font_prefix}13.${Font_color_suffix} 开机自启服务
- ———————————————————————   
- #" && echo
+ ———————————————————————   " && echo
 if [[ -e ${aria2c} ]]; then
     check_pid
     if [[ ! -z "${PID}" ]]; then
@@ -724,7 +724,7 @@ if [[ -e ${aria2c} ]]; then
         echo
         echo -e " 自动更新 BT-Tracker: ${Red_font_prefix}未开启${Font_color_suffix}"
     fi
-     if [[ -n $(Start_auto) ]]; then
+     if [ $auto -eq 0 ]; then
         echo
         echo -e " Aria2开机自启服务: ${Green_font_prefix}已开启${Font_color_suffix}"
      else
