@@ -190,7 +190,6 @@ Service_aria2() {
         update-rc.d -f aria2 defaults
     fi
     wget -N -t2 -T3 "https://github.moeyy.xyz/https://raw.githubusercontent.com/Niter8263/aria2/main/service/aria2c" -O /etc/init.d/aria2c
-    chmod +x /etc/init.d/aria2c
     echo -e "${Info} Aria2服务 管理脚本下载完成 !"
 }
 Installation_dependency() {
