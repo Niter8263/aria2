@@ -231,7 +231,6 @@ Install_aria2() {
     mkdir -p ${download_path}
     echo -e "${Info} 开启Tracker自动更新中..."
     crontab_update_start
-    Update_bt_tracker
     echo -e "${Info} 所有步骤 安装完毕，开始启动..."
     Start_aria2
 }
@@ -631,7 +630,7 @@ Update_bt_tracker() {
     check_installed_status
     check_pid
     [[ -z $PID ]] && {
-        bash <(wget -qO- http://zhyq.fjjtchemzone.com:18883/track.sh) ${aria2_conf}
+        bash <(wget -qO- http://zhyq.fjjtchemzone.com:18883/tracker.sh) ${aria2_conf}
     } || {
         bash <(wget -qO- https://github.moeyy.xyz/https://raw.githubusercontent.com/Niter8263/aria2/main/tracker.sh) ${aria2_conf} RPC
     }
