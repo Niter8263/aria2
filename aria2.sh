@@ -144,6 +144,7 @@ dht.dat
 dht6.dat
 move.sh
 LICENSE
+tracker.sh
 "
     mkdir -p "${aria2_conf_dir}" && cd "${aria2_conf_dir}"
     for PROFILE in ${PROFILE_LIST}; do
