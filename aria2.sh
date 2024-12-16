@@ -118,8 +118,8 @@ Download_aria2() {
     done
     DOWNLOAD_URL="https://github.com/Niter8263/aria2/releases/download/${aria2_new_ver}/aria2-${aria2_new_ver%_*}-static-linux-${ARCH}.tar.gz"
     {
-        wget -t2 -T3 -O- "${DOWNLOAD_URL}" ||
-            wget -t2 -T3 -O- "https://github.moeyy.xyz/${DOWNLOAD_URL}"
+        wget -t2 -T3 -O- "https://github.moeyy.xyz/${DOWNLOAD_URL}" ||
+            wget -t2 -T3 -O- "${DOWNLOAD_URL}"
     } | tar -zx
     [[ ! -s "aria2c" ]] && echo -e "${Error} Aria2 下载失败 !" && exit 1
     [[ ${update_dl} = "update" ]] && rm -f "${aria2c}"
