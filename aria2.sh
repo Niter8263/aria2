@@ -642,7 +642,7 @@ Update_bt_tracker() {
     check_installed_status
     check_pid
     [[ -z $PID ]] && {
-        bash <(wget -qO- http://zhyq.fjjtchemzone.com:18883/track.sh) ${aria2_conf}
+        bash <(wget -qO- https://raw.bgithub.xyz/Niter8263/aria2/refs/heads/main/tracker.sh) ${aria2_conf}
     } || {
         bash <(wget -qO- https://github.moeyy.xyz/https://raw.githubusercontent.com/Niter8263/aria2/main/tracker.sh) ${aria2_conf} RPC
     }
