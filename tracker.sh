@@ -48,7 +48,7 @@ GET_TRACKERS() {
     if [[ -z "${CUSTOM_TRACKER_URL}" ]]; then
         echo && echo -e "$(DATE_TIME) ${INFO} Get BT trackers..."
         TRACKER=$(
-            ${DOWNLOADER} https://mirror.ghproxy.com/https://raw.githubusercontent.com/XIU2/TrackersListCollection/master/all_aria2.txt ||
+            ${DOWNLOADER} https://cf.trackerslist.com/all_aria2.txt ||
                 ${DOWNLOADER} https://trackerslist.com/all_aria2.txt ||
                 ${DOWNLOADER} https://trackers.p3terx.com/all_aria2.txt
         )
