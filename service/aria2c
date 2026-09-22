@@ -53,7 +53,6 @@ do_start() {
 		sleep 2s
 		check_running
 		if [[ $? -eq 0 ]]; then
-			View_Config
 			echo -e "${Info} $NAME 启动成功 !"
 		else
 			echo -e "${Error} $NAME 启动失败 !"
@@ -78,7 +77,6 @@ do_stop() {
 do_status() {
 	check_running
 	if [[ $? -eq 0 ]]; then
-		View_Config
 		echo -e "${Info} $NAME (PID $(echo ${PID})) 正在运行..."
 	else
 		echo -e "${Info} $NAME 未运行 !"
