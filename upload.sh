@@ -87,7 +87,15 @@ DEFINITION_PATH() {
 
 LOAD_RCLONE_ENV() {
     RCLONE_ENV_FILE="${ARIA2_CONF_DIR}/rclone.env"
-    [[ -f ${RCLONE_ENV_FILE} ]] && export $(grep -Ev "^#|^$" ${RCLONE_ENV_FILE} | xargs -0)
+    [[ -f "${RCLONE_ENV_FILE}" ]] || return 0
+    # rclone.env 是 KEY=VALUE 格式（值不带引号），因此按第一个 = 切分后逐个导出。
+    # 不能用 source：值中含空格时会被当成命令执行；
+    # 也不宜用 export $(... | xargs -0)：分隔依赖文件内容，含空格的值会解析错误。
+    local key value
+    while IFS='=' read -r key value; do
+        [[ -z "${key}" || "${key}" = \#* ]] && continue
+        export "${key}=${value}"
+    done <"${RCLONE_ENV_FILE}"
 }
 
 UPLOAD_FILE() {

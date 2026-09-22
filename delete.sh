@@ -43,7 +43,8 @@ CHECK_RPC_CONECTION() {
     else
         RPC_PAYLOAD='{"jsonrpc":"2.0","method":"aria2.getVersion","id":"P3TERX"}'
     fi
-    (curl "${RPC_ADDRESS}" -fsSd "${RPC_PAYLOAD}" || curl "https://${RPC_ADDRESS}" -kfsSd "${RPC_PAYLOAD}") >/dev/null
+    (curl "${RPC_ADDRESS}" --connect-timeout 3 --max-time 10 -fsSd "${RPC_PAYLOAD}" ||
+        curl "https://${RPC_ADDRESS}" --connect-timeout 3 --max-time 10 -kfsSd "${RPC_PAYLOAD}") >/dev/null
 }
 
 DELETE_ON_STOP() {

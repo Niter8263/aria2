@@ -81,7 +81,9 @@ ADD_TRACKERS() {
         echo -e "$(DATE_TIME) ${ERROR} '${ARIA2_CONF}' does not exist."
         exit 1
     else
-        [ -z $(grep "bt-tracker=" ${ARIA2_CONF}) ] && echo "bt-tracker=" >>${ARIA2_CONF}
+        # 用 grep -q 判断，避免 [ -z $(grep ...) ] 在无输出时退化成 [ -z ]、
+        # 有输出时又因词分割被拆成多个参数的问题
+        grep -q "^bt-tracker=" "${ARIA2_CONF}" || echo "bt-tracker=" >>"${ARIA2_CONF}"
         sed -i "s@^\(bt-tracker=\).*@\1${TRACKER}@" ${ARIA2_CONF} && echo -e "$(DATE_TIME) ${INFO} BT trackers successfully added to Aria2 configuration file !"
 
     fi
@@ -125,7 +127,7 @@ ADD_TRACKERS_LOCAL_RPC() {
     fi
 }
 
-[ $(command -v curl) ] || {
+command -v curl >/dev/null 2>&1 || {
     echo -e "$(DATE_TIME) ${ERROR} curl is not installed."
     exit 1
 }

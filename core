@@ -28,7 +28,7 @@
 TASK_GID=$1
 FILE_NUM=$2
 FILE_PATH=$3
-ARIA2_CONF_DIR="$(dirname $0)"
+ARIA2_CONF_DIR="$(dirname "$0")"
 ARIA2_CONF="${ARIA2_CONF_DIR}/aria2.conf"
 ARIA2_SESSION="${ARIA2_CONF_DIR}/aria2.session"
 SCRIPT_CONF="${ARIA2_CONF_DIR}/script.conf"
@@ -110,7 +110,10 @@ RPC_TASK_INFO() {
     else
         RPC_PAYLOAD='{"jsonrpc":"2.0","method":"aria2.tellStatus","id":"P3TERX","params":["'${TASK_GID}'"]}'
     fi
-    curl "${RPC_ADDRESS}" -fsSd "${RPC_PAYLOAD}" || curl "https://${RPC_ADDRESS}" -kfsSd "${RPC_PAYLOAD}"
+    # 加超时：本机 RPC 若因故无响应，curl 可能长时间挂起，
+    # 而钩子脚本由 Aria2 串行调用，会拖住其它任务完成后的处理。
+    curl "${RPC_ADDRESS}" --connect-timeout 3 --max-time 10 -fsSd "${RPC_PAYLOAD}" ||
+        curl "https://${RPC_ADDRESS}" --connect-timeout 3 --max-time 10 -kfsSd "${RPC_PAYLOAD}"
 }
 
 GET_TASK_INFO() {
@@ -186,18 +189,29 @@ DELETE_DOT_ARIA2() {
 
 DELETE_TORRENT_FILES() {
     sleep $(($SAVE_SESSION_INTERVAL + 1))
-    TORRENT_FILES=$(ls "${DOWNLOAD_DIR}" | grep '.*.torrent')
-    if [[ -f "${ARIA2_SESSION}" && -n "${TORRENT_FILES}" ]]; then
-        for TORRENT_FILE in "${TORRENT_FILES}"; do
-            if [[ -n "${TORRENT_FILE}" && -z $(cat "${ARIA2_SESSION}" | grep -i "${TORRENT_FILE%.*}") ]]; then
+    if [[ -f "${ARIA2_SESSION}" ]]; then
+        # 必须逐个文件判断。原实现 for x in "${TORRENT_FILES}" 会给多行变量加引号，
+        # 导致整个列表被当作一个词、循环只执行一次；且 grep 模式中混入换行符
+        # （GNU grep 视作“或”），只要 session 里命中任意一个种子名就会跳过整批删除，
+        # 使 enhanced 模式静默失效、一个种子文件都删不掉。
+        local TORRENT_FILE TORRENT_BASENAME TORRENT_FOUND
+        TORRENT_FOUND=0
+        while IFS= read -r TORRENT_FILE; do
+            [[ -z "${TORRENT_FILE}" ]] && continue
+            TORRENT_FOUND=1
+            TORRENT_BASENAME="${TORRENT_FILE##*/}"
+            # session 文件中仍引用该种子的（正在下载/等待中）予以保留
+            if grep -qi -- "${TORRENT_BASENAME%.*}" "${ARIA2_SESSION}"; then
+                echo -e "$(DATE_TIME) ${INFO} .torrent file is in use, keep it: ${TORRENT_BASENAME}"
+            else
                 echo -e "$(DATE_TIME) ${INFO} Deleting .torrent file (enhanced) ..."
-                rm -vf ${DOWNLOAD_DIR}/${TORRENT_FILE}
+                rm -vf "${TORRENT_FILE}"
             fi
-        done
-    else
-        [[ ! -f "${ARIA2_SESSION}" ]] &&
-            echo -e "$(DATE_TIME) ${ERROR} '${ARIA2_SESSION}' does not exist." ||
+        done < <(find "${DOWNLOAD_DIR}" -maxdepth 1 -type f -name '*.torrent')
+        [[ ${TORRENT_FOUND} -eq 0 ]] &&
             echo -e "$(DATE_TIME) ${WARRING} .torrent file does not exist."
+    else
+        echo -e "$(DATE_TIME) ${ERROR} '${ARIA2_SESSION}' does not exist."
     fi
 }
 
