@@ -291,7 +291,7 @@ Download_aria2_conf() {
     # 配置文件：重置时会被覆盖
     CONF_LIST="aria2.conf script.conf rclone.env"
     # 功能脚本与数据文件：始终保留本地版本，仅在缺失时补齐
-    SCRIPT_LIST="core clean.sh delete.sh move.sh upload.sh LICENSE dht.dat dht6.dat"
+    SCRIPT_LIST="core clean.sh delete.sh move.sh upload.sh LICENSE dht.dat dht6.dat tracker.sh"
     mkdir -p "${aria2_conf_dir}" && cd "${aria2_conf_dir}"
     # 失败清理时只删本次真正需要下载的东西，不能整目录 rm -rf：
     # 目录里可能已有本地修改过的功能脚本，误删会直接丢失本地修复。
