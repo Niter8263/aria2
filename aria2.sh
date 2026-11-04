@@ -21,6 +21,7 @@ aria2_conf_dir="/root/.aria2c"
 download_path="/root/downloads"
 aria2_conf="${aria2_conf_dir}/aria2.conf"
 aria2_log="${aria2_conf_dir}/aria2.log"
+script_conf="${aria2_conf_dir}/script.conf"
 aria2c="/usr/local/bin/aria2c"
 Crontab_file="/usr/bin/crontab"
 # RPC 端口允许的来源网段。
@@ -31,7 +32,7 @@ rpc_allow_source="192.168.0.0/16 10.0.0.0/8 172.16.0.0/12 127.0.0.1/8"
 # ==================== GitHub 代理设置 ====================
 # 公共 GitHub 代理会不定期失效，因此这里配置成“可改 + 自动多线路回退”。
 # 优先级：你配置的代理 → 备用代理列表 → 直连 GitHub。
-# 需要更换时请使用菜单 14「设置 GitHub 代理」，不要直接改这里的值（改脚本可能不生效）。
+# 需要更换时请使用菜单 15「设置 GitHub 代理」，不要直接改这里的值（改脚本可能不生效）。
 # 默认选 gh-proxy.com：实测下载二进制比 ghproxy.net 快约 6 倍，且支持 api.github.com（可查版本号）。
 gh_proxy="https://gh-proxy.com/"
 # 备用代理，脚本会按顺序依次尝试。留空表示只用上面配置的代理和直连。
@@ -94,6 +95,7 @@ check_systemd() {
     [[ -d /run/systemd/system ]] && command -v systemctl >/dev/null 2>&1
 }
 check_crontab_installed_status() {
+    check_sys
     if [[ ! -e ${Crontab_file} ]]; then
         echo -e "${Error} Crontab 没有安装，开始安装..."
         if [[ ${release} == "centos" ]]; then
@@ -109,8 +111,14 @@ check_crontab_installed_status() {
     fi
 }
 check_pid() {
+    # systemd 环境下直接取 unit 的 MainPID，避免同机其它 aria2c 进程被误判。
+    if check_systemd && [[ -e /etc/systemd/system/aria2.service ]]; then
+        PID=$(systemctl show -p MainPID --value aria2 2>/dev/null)
+        [[ -z ${PID} || ${PID} == "0" ]] && PID=""
+        return 0
+    fi
+    # 非 systemd / 尚未安装 unit 时回退到进程名匹配。
     # 用 pgrep 精确匹配进程名，避免 ps -ef | grep 把路径中含 "aria2c" 的无关进程也算进来。
-    # pgrep 不存在时回退到原来的匹配方式。
     if command -v pgrep >/dev/null 2>&1; then
         PID=$(pgrep -x aria2c 2>/dev/null)
     else
@@ -244,13 +252,13 @@ Download_aria2() {
     if ! dl_fetch "${tmp_tar}" "${bin_url}"; then
         rm -f "${tmp_tar}"
         echo -e "${Error} Aria2 主程序下载失败（所有线路均不可用）!"
-        echo -e "${Tip} 可用菜单 14「设置 GitHub 代理」更换代理后重试。"
+        echo -e "${Tip} 可用菜单 15「设置 GitHub 代理」更换代理后重试。"
         exit 1
     fi
     if ! tar -xzf "${tmp_tar}"; then
         rm -f "${tmp_tar}"
         echo -e "${Error} Aria2 压缩包解压失败，代理可能返回了异常内容 !"
-        echo -e "${Tip} 可更换代理后重试：菜单 14「设置 GitHub 代理」"
+        echo -e "${Tip} 可更换代理后重试：菜单 15「设置 GitHub 代理」"
         exit 1
     fi
     rm -f "${tmp_tar}"
@@ -353,7 +361,7 @@ Service_aria2_systemd() {
     dl_install "${unit}" "$(gh_raw_url "service/aria2.service")"
     [[ ! -s ${unit} ]] && {
         echo -e "${Error} Aria2 systemd 服务文件下载失败 !"
-        echo -e "${Tip} 可用菜单 14「设置 GitHub 代理」更换代理后重试。"
+        echo -e "${Tip} 可用菜单 15「设置 GitHub 代理」更换代理后重试。"
         exit 1
     }
     chmod 644 "${unit}"
@@ -384,7 +392,7 @@ Service_aria2_sysv() {
     dl_install /etc/init.d/aria2 "$(gh_raw_url "service/${svc_name}")"
     [[ ! -s /etc/init.d/aria2 ]] && {
         echo -e "${Error} Aria2服务 管理脚本下载失败 !"
-        echo -e "${Tip} 可用菜单 14「设置 GitHub 代理」更换代理后重试。"
+        echo -e "${Tip} 可用菜单 15「设置 GitHub 代理」更换代理后重试。"
         exit 1
     }
     chmod +x /etc/init.d/aria2
@@ -534,13 +542,61 @@ Start_auto_stop() {
     fi
 }
 
+View_Config() {
+    # 原本这段输出在 SysV init 脚本的 do_start()/do_status() 里，
+    # 切换到 systemd 后 systemctl 不会再调用它，所以搬到主脚本里。
+    # 每次调用都重新 Read_config + 清屏输出，保证改完配置后看到的是最新值。
+    Read_config
+    local ipv4 ipv6 ariang_url="null" secret_b64 u out
+    ipv4=""
+    for u in api.ip.sb/ip ifconfig.io/ip www.trackip.net/ip ifconfig.me/ip ipinfo.io/ip; do
+        out=$(wget -qO- -t1 -T2 -4 "https://${u}" 2>/dev/null | tr -d '\r\n')
+        [[ -n ${out} ]] && { ipv4="${out}"; break; }
+    done
+    [[ -z ${ipv4} ]] && ipv4="IPv4 地址检测失败"
+
+    if grep -qE '^disable-ipv6=true' "${aria2_conf}"; then
+        ipv6="已禁用 (disable-ipv6=true)"
+    else
+        ipv6=""
+        for u in api.ip.sb/ip ifconfig.io/ip www.trackip.net/ip ifconfig.me/ip ipinfo.io/ip; do
+            out=$(wget -qO- -t1 -T2 -6 "https://${u}" 2>/dev/null | tr -d '\r\n')
+            [[ -n ${out} ]] && { ipv6="${out}"; break; }
+        done
+        [[ -z ${ipv6} ]] && ipv6="IPv6 地址检测失败"
+    fi
+
+    [[ -z ${aria2_dir} ]] && aria2_dir="找不到配置参数"
+    [[ -z ${aria2_port} ]] && aria2_port="找不到配置参数"
+    [[ -z ${aria2_passwd} ]] && aria2_passwd="找不到配置参数(或无密钥)"
+    if [[ ${ipv4} != *"失败"* && ${aria2_port} != *"找不到"* ]]; then
+        secret_b64=$(printf '%s' "${aria2_passwd}" | base64 | tr -d '\n')
+        ariang_url="http://ariang.js.org/#!/settings/rpc/set/ws/${ipv4}/${aria2_port}/jsonrpc/${secret_b64}"
+    fi
+    clear
+    echo -e "\nAria2 简单配置信息：\n
+ IPv4 地址\t: ${Green_font_prefix}${ipv4}${Font_color_suffix}
+ IPv6 地址\t: ${Green_font_prefix}${ipv6}${Font_color_suffix}
+ RPC 端口\t: ${Green_font_prefix}${aria2_port}${Font_color_suffix}
+ RPC 密钥\t: ${Green_font_prefix}${aria2_passwd}${Font_color_suffix}
+ 下载目录\t: ${Green_font_prefix}${aria2_dir}${Font_color_suffix}
+ AriaNg 链接\t: ${Green_font_prefix}${ariang_url}${Font_color_suffix}\n"
+}
 Start_aria2() {
     check_installed_status
     check_pid
     [[ ! -z ${PID} ]] && echo -e "${Error} Aria2 正在运行，请检查 !" && exit 1
     if check_systemd; then
         systemctl start aria2
+        sleep 1
+        if systemctl is-active --quiet aria2; then
+            View_Config
+            echo -e "${Info} Aria2 启动成功 !"
+        else
+            echo -e "${Error} Aria2 启动失败 !"
+        fi
     else
+        # SysV init 脚本的 do_start() 自己会打印配置信息和启动结果，不要重复输出
         /etc/init.d/aria2 start
     fi
 }
@@ -550,6 +606,11 @@ Stop_aria2() {
     [[ -z ${PID} ]] && echo -e "${Error} Aria2 没有运行，请检查 !" && exit 1
     if check_systemd; then
         systemctl stop aria2
+        if systemctl is-active --quiet aria2; then
+            echo -e "${Error} Aria2 停止失败 !"
+        else
+            echo -e "${Info} Aria2 停止成功 !"
+        fi
     else
         /etc/init.d/aria2 stop
     fi
@@ -559,14 +620,89 @@ Restart_aria2() {
     if check_systemd; then
         # restart 对未运行的 unit 会自动 start，不需要先判断 PID
         systemctl restart aria2
+        sleep 1
+        if systemctl is-active --quiet aria2; then
+            View_Config
+            echo -e "${Info} Aria2 重启成功 !"
+        else
+            echo -e "${Error} Aria2 重启失败 !"
+        fi
     else
         check_pid
         [[ ! -z ${PID} ]] && /etc/init.d/aria2 stop
         /etc/init.d/aria2 start
     fi
 }
+Set_move_on_complete() {
+    check_installed_status
+    local move_script="${aria2_conf_dir}/move.sh"
+    local clean_script="${aria2_conf_dir}/clean.sh"
+    local dest_conf new_dest esc
+    [[ ! -s ${move_script} ]] && echo -e "${Error} move.sh 不存在，请先重新安装或刷新配置 !" && return 1
+    [[ ! -s ${script_conf} ]] && echo -e "${Error} script.conf 不存在，请先重新安装或刷新配置 !" && return 1
+
+    dest_conf=$(grep -E '^#?dest-dir=' "${script_conf}" | tail -1 | cut -d= -f2-)
+    [[ -z ${dest_conf} ]] && dest_conf="${download_path}/completed"
+
+    echo
+    if move_on_complete_status; then
+        echo -e " 当前状态: ${Green_font_prefix}已开启${Font_color_suffix} 下载完成后移动文件"
+        echo -e " 目标目录: ${Green_font_prefix}${dest_conf}${Font_color_suffix}"
+        echo
+        echo -e " 是否关闭此功能？[y/N] \c"
+        read -e move_yn
+        [[ -z ${move_yn} ]] && move_yn="n"
+        if [[ ${move_yn} == [Yy] ]]; then
+            if grep -qE '^#?on-download-complete=' "${aria2_conf}"; then
+                sed -i -E "s@^#?on-download-complete=.*@on-download-complete=${clean_script}@" "${aria2_conf}"
+            fi
+            echo -e "${Info} 已关闭，下载完成后只执行清理"
+            Restart_aria2
+        else
+            echo && echo " 已取消..." && echo
+        fi
+        return 0
+    fi
+
+    echo -e " 当前状态: ${Red_font_prefix}未开启${Font_color_suffix}"
+    echo
+    echo -e " 是否开启 [下载完成后移动文件]？[y/N] \c"
+    read -e move_yn
+    [[ -z ${move_yn} ]] && move_yn="n"
+    if [[ ${move_yn} != [Yy] ]]; then
+        echo && echo " 已取消..." && echo
+        return 0
+    fi
+
+    echo
+    read -e -p " 请输入移动目标目录(默认: ${dest_conf}): " new_dest
+    [[ -z ${new_dest} ]] && new_dest="${dest_conf}"
+
+    if ! mkdir -p "${new_dest}" 2>/dev/null || [[ ! -d ${new_dest} ]]; then
+        echo -e "${Error} 目标目录创建失败: ${new_dest}"
+        return 1
+    fi
+
+    # 转义 sed 替换串里的特殊字符（& 和分隔符 |）
+    esc=$(printf '%s' "${new_dest}" | sed 's/[&|]/\\&/g')
+    if grep -qE '^#?dest-dir=' "${script_conf}"; then
+        sed -i -E "s|^#?dest-dir=.*|dest-dir=${esc}|" "${script_conf}"
+    else
+        printf '\ndest-dir=%s\n' "${new_dest}" >>"${script_conf}"
+    fi
+
+    if grep -qE '^#?on-download-complete=' "${aria2_conf}"; then
+        sed -i -E "s@^#?on-download-complete=.*@on-download-complete=${move_script}@" "${aria2_conf}"
+    else
+        printf '\non-download-complete=%s\n' "${move_script}" >>"${aria2_conf}"
+    fi
+
+    echo -e "${Info} 已开启：下载完成后移动到 ${Green_font_prefix}${new_dest}${Font_color_suffix}"
+    Restart_aria2
+}
 Set_aria2() {
     check_installed_status
+    check_sys
     echo -e "
  ${Green_font_prefix}1.${Font_color_suffix} 修改 Aria2 RPC 密钥
  ${Green_font_prefix}2.${Font_color_suffix} 修改 Aria2 RPC 端口
@@ -815,41 +951,9 @@ Read_config() {
     fi
 }
 View_Aria2() {
+    # 统一走 View_Config，避免两套配置页面各写一遍、以后改一处漏一处
     check_installed_status
-    Read_config
-    # 逐个服务尝试，取第一个“有内容”的结果。
-    # 不能只用 || 串联：若某个服务返回空内容但退出码为 0，|| 不会触发，
-    # 会把空值当成结果，导致地址被误显示为“检测失败”。
-    IPV4=""
-    local u out
-    for u in api.ip.sb/ip ifconfig.io/ip www.trackip.net/ip ifconfig.me/ip ipinfo.io/ip; do
-        out=$(wget -qO- -t1 -T3 -4 "https://${u}" 2>/dev/null | tr -d '\r\n')
-        [[ -n ${out} ]] && { IPV4="${out}"; break; }
-    done
-    IPV6=""
-    for u in api.ip.sb/ip ifconfig.io/ip www.trackip.net/ip ifconfig.me/ip ipinfo.io/ip; do
-        out=$(wget -qO- -t1 -T3 -6 "https://${u}" 2>/dev/null | tr -d '\r\n')
-        [[ -n ${out} ]] && { IPV6="${out}"; break; }
-    done
-    [[ -z "${IPV4}" ]] && IPV4="IPv4 地址检测失败"
-    [[ -z "${IPV6}" ]] && IPV6="IPv6 地址检测失败"
-    [[ -z "${aria2_dir}" ]] && aria2_dir="找不到配置参数"
-    [[ -z "${aria2_port}" ]] && aria2_port="找不到配置参数"
-    [[ -z "${aria2_passwd}" ]] && aria2_passwd="找不到配置参数(或无密钥)"
-    if [[ -z "${IPV4}" || -z "${aria2_port}" ]]; then
-        AriaNg_URL="null"
-    else
-        AriaNg_API="/#!/settings/rpc/set/ws/${IPV4}/${aria2_port}/jsonrpc/$(echo -n ${aria2_passwd} | base64)"
-        AriaNg_URL="http://ariang.js.org${AriaNg_API}"
-    fi
-    clear
-    echo -e "\nAria2 简单配置信息：\n
- IPv4 地址\t: ${Green_font_prefix}${IPV4}${Font_color_suffix}
- IPv6 地址\t: ${Green_font_prefix}${IPV6}${Font_color_suffix}
- RPC 端口\t: ${Green_font_prefix}${aria2_port}${Font_color_suffix}
- RPC 密钥\t: ${Green_font_prefix}${aria2_passwd}${Font_color_suffix}
- 下载目录\t: ${Green_font_prefix}${aria2_dir}${Font_color_suffix}
- AriaNg 链接\t: ${Green_font_prefix}${AriaNg_URL}${Font_color_suffix}\n"
+    View_Config
 }
 View_Log() {
     [[ ! -e ${aria2_log} ]] && echo -e "${Error} Aria2 日志文件不存在 !" && exit 1
@@ -863,6 +967,12 @@ Clean_Log() {
 }
 crontab_update_status() {
     crontab -l | grep "tracker.sh"
+}
+move_on_complete_status() {
+    [[ -e ${aria2_conf} ]] || return 1
+    local cur
+    cur=$(grep -E '^#?on-download-complete=' "${aria2_conf}" | tail -1 | cut -d= -f2-)
+    [[ ${cur} == "${aria2_conf_dir}/move.sh" ]]
 }
 Update_bt_tracker_cron() {
     check_installed_status
@@ -934,7 +1044,7 @@ Update_bt_tracker() {
     if ! dl_fetch "${tracker_tmp}" "$(gh_raw_url tracker.sh)"; then
         rm -f "${tracker_tmp}"
         echo -e "${Error} tracker.sh 下载失败（所有线路均不可用）!"
-        echo -e "${Tip} 可用菜单 14「设置 GitHub 代理」更换代理后重试。"
+        echo -e "${Tip} 可用菜单 15「设置 GitHub 代理」更换代理后重试。"
         exit 1
     fi
     # Aria2 正在运行时通过 RPC 热更新，无需重启
@@ -949,6 +1059,7 @@ Update_aria2() {
 }
 Uninstall_aria2() {
     check_installed_status "un"
+    check_sys
     echo "确定要卸载 Aria2 ? (y/N)"
     echo
     read -e -p "(默认: n):" unyn
@@ -959,6 +1070,12 @@ Uninstall_aria2() {
         sed -i "/tracker.sh/d" "/tmp/crontab.bak"
         crontab "/tmp/crontab.bak"
         rm -f "/tmp/crontab.bak"
+        # 先停服务再清理：systemd 下若先 kill -9，Restart=on-failure 会在 5 秒后
+        # 把进程重新拉起，卸载过程中可能残留一个运行中的实例。
+        if [[ -e /etc/systemd/system/aria2.service ]]; then
+            systemctl stop aria2 >/dev/null 2>&1
+            systemctl disable aria2 >/dev/null 2>&1
+        fi
         check_pid
         [[ ! -z $PID ]] && kill -9 ${PID}
         Read_config "un"
@@ -967,11 +1084,17 @@ Uninstall_aria2() {
         rm -rf "${aria2c}"
         rm -rf "${aria2_conf_dir}"
         if [[ -e /etc/systemd/system/aria2.service ]]; then
-            systemctl stop aria2 >/dev/null 2>&1
-            systemctl disable aria2 >/dev/null 2>&1
             rm -f /etc/systemd/system/aria2.service
             systemctl daemon-reload
         fi
+        # 清理防火墙开机恢复单元（新版）和旧的 ifupdown 钩子（老版本残留）
+        if [[ -e /etc/systemd/system/aria2-iptables.service ]]; then
+            systemctl disable aria2-iptables.service >/dev/null 2>&1
+            systemctl stop aria2-iptables.service >/dev/null 2>&1
+            rm -f /etc/systemd/system/aria2-iptables.service
+            systemctl daemon-reload
+        fi
+        rm -f /etc/network/if-pre-up.d/iptables
         if [[ ${release} = "centos" ]]; then
             chkconfig --del aria2 >/dev/null 2>&1
         else
@@ -1004,19 +1127,48 @@ Del_iptables() {
 }
 Save_iptables() {
     if [[ ${release} == "centos" ]]; then
-        service iptables save
+        # 只有装了 iptables-services 才有 iptables.service；firewalld 环境下没有，
+        # 此时无法用这种方式持久化，静默跳过（Set_iptables 里会提示一次）。
+        systemctl list-unit-files 2>/dev/null | grep -q '^iptables\.service' && service iptables save
     else
         iptables-save >/etc/iptables.up.rules
     fi
 }
 Set_iptables() {
     if [[ ${release} == "centos" ]]; then
-        service iptables save
-        chkconfig --level 2345 iptables on
+        if systemctl list-unit-files 2>/dev/null | grep -q '^iptables\.service'; then
+            service iptables save
+            systemctl enable iptables >/dev/null 2>&1 || chkconfig --level 2345 iptables on
+        else
+            echo -e "${Tip} 未检测到 iptables-services，防火墙规则无法持久化。"
+            echo -e "      请手动放行 TCP ${aria2_RPC_port:-6800}、TCP ${aria2_bt_port:-51413}、UDP ${aria2_dht_port:-51413}"
+        fi
     else
         iptables-save >/etc/iptables.up.rules
-        echo -e '#!/bin/bash\n/sbin/iptables-restore < /etc/iptables.up.rules' >/etc/network/if-pre-up.d/iptables
-        chmod +x /etc/network/if-pre-up.d/iptables
+        if check_systemd; then
+            # Ubuntu 22.04+/Debian 12+ 用 netplan/systemd-networkd，默认没有 ifupdown，
+            # /etc/network/if-pre-up.d/ 下的钩子开机不会执行，规则重启后会丢。
+            # 用 systemd oneshot 在开机时 iptables-restore。
+            cat >/etc/systemd/system/aria2-iptables.service <<'UNIT'
+[Unit]
+Description=Restore iptables rules for Aria2
+Before=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+ExecStart=/sbin/iptables-restore /etc/iptables.up.rules
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+            systemctl daemon-reload
+            systemctl enable aria2-iptables.service >/dev/null 2>&1
+        else
+            echo -e '#!/bin/bash\n/sbin/iptables-restore < /etc/iptables.up.rules' >/etc/network/if-pre-up.d/iptables
+            chmod +x /etc/network/if-pre-up.d/iptables
+        fi
     fi
 }
 Update_Shell() {
@@ -1178,7 +1330,8 @@ case "$1" in
     ;;
 esac
 
-echo && echo -e " Aria2 一键安装管理脚本 增强版 ${Red_font_prefix}[v${sh_ver}]${Font_color_suffix} by \033[1;35mNiter\033[0m
+while true; do
+    echo && echo -e " Aria2 一键安装管理脚本 增强版 ${Red_font_prefix}[v${sh_ver}]${Font_color_suffix} by \033[1;35mNiter\033[0m
 
  ${Green_font_prefix} 0.${Font_color_suffix} 升级脚本
  ———————————————————————
@@ -1197,88 +1350,92 @@ echo && echo -e " Aria2 一键安装管理脚本 增强版 ${Red_font_prefix}[v$
  ———————————————————————
  ${Green_font_prefix}11.${Font_color_suffix} 手动更新 BT-Tracker
  ${Green_font_prefix}12.${Font_color_suffix} 自动更新 BT-Tracker
+ ${Green_font_prefix}13.${Font_color_suffix} 下载完成后移动文件
  ———————————————————————
- ${Green_font_prefix}13.${Font_color_suffix} 开机自启服务
+ ${Green_font_prefix}14.${Font_color_suffix} 开机自启服务
+ ${Green_font_prefix}15.${Font_color_suffix} 设置 GitHub 代理
  ———————————————————————
- ${Green_font_prefix}14.${Font_color_suffix} 设置 GitHub 代理
- ———————————————————————   " && echo
-if [[ -e ${aria2c} ]]; then
-    check_pid
-    if [[ ! -z "${PID}" ]]; then
-        echo -e " Aria2 状态: ${Green_font_prefix}已安装${Font_color_suffix} | ${Green_font_prefix}已启动${Font_color_suffix}"
+ ${Green_font_prefix}16.${Font_color_suffix} 退出脚本
+ ———————————————————————
+"
+
+    if [[ -e ${aria2c} ]]; then
+        local_ver=$("${aria2c}" -v 2>/dev/null | awk '/aria2 version/{print $3; exit}')
+        [[ -z ${local_ver} ]] && local_ver="未知"
+        conf_port=$(grep '^rpc-listen-port=' "${aria2_conf}" 2>/dev/null | tail -1 | cut -d= -f2-)
+        [[ -z ${conf_port} ]] && conf_port="未知"
+        check_pid
+        if [[ ! -z "${PID}" ]]; then
+            run_state="${Green_font_prefix}已启动${Font_color_suffix}"
+        else
+            run_state="${Red_font_prefix}未启动${Font_color_suffix}"
+        fi
+        if check_autostart_status; then
+            autostart_state="${Green_font_prefix}已开启${Font_color_suffix}"
+        else
+            autostart_state="${Red_font_prefix}未开启${Font_color_suffix}"
+        fi
+        if [[ -n $(crontab_update_status) ]]; then
+            tracker_state="${Green_font_prefix}已开启${Font_color_suffix}"
+        else
+            tracker_state="${Red_font_prefix}未开启${Font_color_suffix}"
+        fi
+        if move_on_complete_status; then
+            move_state="${Green_font_prefix}已开启${Font_color_suffix}"
+        else
+            move_state="${Red_font_prefix}未开启${Font_color_suffix}"
+        fi
+        echo -e " 状态: ${Green_font_prefix}已安装${Font_color_suffix} | ${run_state} | RPC端口: ${Green_font_prefix}${conf_port}${Font_color_suffix} | 版本: ${local_ver}"
+        echo
+        echo -e " 自启: ${autostart_state} | 自动BT-Tracker: ${tracker_state} | 完成移动：${move_state}"
     else
-        echo -e " Aria2 状态: ${Green_font_prefix}已安装${Font_color_suffix} | ${Red_font_prefix}未启动${Font_color_suffix}"
+        echo
+        echo -e " 状态: ${Red_font_prefix}未安装${Font_color_suffix}"
     fi
-    if [[ -n $(crontab_update_status) ]]; then
-        echo
-        echo -e " 自动更新 BT-Tracker: ${Green_font_prefix}已开启${Font_color_suffix}"
-    else
-        echo
-        echo -e " 自动更新 BT-Tracker: ${Red_font_prefix}未开启${Font_color_suffix}"
-    fi
-    if check_autostart_status; then
-        echo
-        echo -e " Aria2开机自启: ${Green_font_prefix}已开启${Font_color_suffix}"
-    else
-        echo
-        echo -e " Aria2开机自启: ${Red_font_prefix}未开启${Font_color_suffix}"
-    fi
-else
-    echo
-    echo -e " Aria2 状态: ${Red_font_prefix}未安装${Font_color_suffix}"
-fi
     echo
     echo -e " GitHub 代理: ${Green_font_prefix}${gh_proxy:-（未配置，直连）}${Font_color_suffix}"
     echo
-read -e -p " 请输入数字 [0-14]:" num
-case "$num" in
-0)
-    Update_Shell
-    ;;
-1)
-    Install_aria2
-    ;;
-2)
-    Update_aria2
-    ;;
-3)
-    Uninstall_aria2
-    ;;
-4)
-    Start_aria2
-    ;;
-5)
-    Stop_aria2
-    ;;
-6)
-    Restart_aria2
-    ;;
-7)
-    Set_aria2
-    ;;
-8)
-    View_Aria2
-    ;;
-9)
-    View_Log
-    ;;
-10)
-    Clean_Log
-    ;;
-11)
-    Update_bt_tracker
-    ;;
-12)
-    Update_bt_tracker_cron
-    ;;
-13)
-    Start_auto
-    ;;
-14)
-    Set_gh_proxy
-    ;;
-*)
-    echo
-    echo -e " ${Error} 请输入正确的数字"
-    ;;
-esac
+
+    if ! read -e -p " 请输入数字 [0-16]:" num; then
+        # 输入结束（管道 / EOF）时退出，避免死循环
+        echo
+        break
+    fi
+
+    # 每个功能放到子 shell 里执行：功能内部大量使用 exit 1 做错误退出，
+    # 子 shell 里的 exit 不会结束主菜单，操作失败后仍可继续选择其它功能。
+    case "$num" in
+    0) ( Update_Shell ) ;;
+    1) ( Install_aria2 ) ;;
+    2) ( Update_aria2 ) ;;
+    3) ( Uninstall_aria2 ) ;;
+    4) ( Start_aria2 ) ;;
+    5) ( Stop_aria2 ) ;;
+    6) ( Restart_aria2 ) ;;
+    7) ( Set_aria2 ) ;;
+    8) ( View_Aria2 ) ;;
+    9) ( View_Log ) ;;
+    10) ( Clean_Log ) ;;
+    11) ( Update_bt_tracker ) ;;
+    12) ( Update_bt_tracker_cron ) ;;
+    13) ( Set_move_on_complete ) ;;
+    14) ( Start_auto ) ;;
+    15) ( Set_gh_proxy ) ;;
+    16)
+        echo
+        echo -e " ${Info} 已退出"
+        echo
+        break
+        ;;
+    *)
+        echo
+        echo -e " ${Error} 请输入正确的数字"
+        ;;
+    esac
+
+    # 交互式终端下暂停再刷新菜单；管道 / 自动化执行时不阻塞
+    if [[ ${num} != 16 && -t 0 ]]; then
+        echo
+        read -e -p " 按回车键返回主菜单..." _
+    fi
+done
