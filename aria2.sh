@@ -606,11 +606,12 @@ Start_aria2() {
     check_pid
     [[ ! -z ${PID} ]] && echo -e "${Error} Aria2 正在运行，请检查 !" && exit 1
     if check_systemd; then
+        echo -e "${Info} Aria2 正在启动..."
         systemctl start aria2
         sleep 1
         if systemctl is-active --quiet aria2; then
+            # 能看到配置页就说明已经启动成功，不再额外打成功提示
             View_Config
-            echo -e "${Info} Aria2 启动成功 !"
         else
             echo -e "${Error} Aria2 启动失败 !"
         fi
@@ -638,11 +639,12 @@ Restart_aria2() {
     check_installed_status
     if check_systemd; then
         # restart 对未运行的 unit 会自动 start，不需要先判断 PID
+        echo -e "${Info} Aria2 正在重启..."
         systemctl restart aria2
         sleep 1
         if systemctl is-active --quiet aria2; then
+            # 能看到配置页就说明已经重启成功，不再额外打成功提示
             View_Config
-            echo -e "${Info} Aria2 重启成功 !"
         else
             echo -e "${Error} Aria2 重启失败 !"
         fi
@@ -1403,6 +1405,8 @@ case "$1" in
 esac
 
 while true; do
+    # 交互模式下每次回到菜单先清屏，避免上一次操作的输出和菜单堆在一起
+    if [[ -t 0 ]]; then clear 2>/dev/null || true; fi
     echo && echo -e " Aria2 一键安装管理脚本 增强版 ${Red_font_prefix}[v${sh_ver}]${Font_color_suffix} by \033[1;35mNiter\033[0m
 
  ${Green_font_prefix} 0.${Font_color_suffix} 升级脚本
