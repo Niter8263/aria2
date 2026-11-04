@@ -6,6 +6,10 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+# systemd 不会为服务设置 HOME。P3TERX/Niter 的 1.36 静态构建在 HOME 为空时会段错误，
+# 必须显式设置，否则服务会陷入 core-dump 重启循环。
+Environment=HOME=/root
+Environment=LANG=C.UTF-8
 # 日志仍然写回 aria2.sh 里的 aria2_log 路径，保证菜单「查看日志」可用。
 # 这里用 shell 重定向而不是 StandardOutput=append:，是为了兼容 systemd 219（CentOS 7）。
 ExecStart=/bin/sh -c 'exec /usr/local/bin/aria2c --conf-path=/root/.aria2c/aria2.conf >>/root/.aria2c/aria2.log 2>&1'
