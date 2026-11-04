@@ -299,7 +299,9 @@ Download_aria2_conf() {
     # 配置文件：重置时会被覆盖
     CONF_LIST="aria2.conf script.conf rclone.env"
     # 功能脚本与数据文件：始终保留本地版本，仅在缺失时补齐
-    SCRIPT_LIST="core clean.sh delete.sh move.sh upload.sh LICENSE dht.dat dht6.dat"
+    # tracker.sh 必须装到 ${aria2_conf_dir}：crontab_update_start 的定时任务
+    # 直接调用 ${aria2_conf_dir}/tracker.sh，之前漏装会导致每天 00:00 静默失败。
+    SCRIPT_LIST="core clean.sh delete.sh move.sh upload.sh LICENSE dht.dat dht6.dat tracker.sh"
     mkdir -p "${aria2_conf_dir}" && cd "${aria2_conf_dir}"
     # 失败清理时只删本次真正需要下载的东西，不能整目录 rm -rf：
     # 目录里可能已有本地修改过的功能脚本，误删会直接丢失本地修复。
@@ -888,6 +890,16 @@ Update_bt_tracker_cron() {
     fi
 }
 crontab_update_start() {
+    # 定时任务直接调用 ${aria2_conf_dir}/tracker.sh，缺失时先补齐。
+    # 旧版本的 SCRIPT_LIST 里没有 tracker.sh，升级脚本后不重装的话
+    # cron 会每天静默失败（No such file or directory），这里做一次自愈。
+    if [[ ! -s "${aria2_conf_dir}/tracker.sh" ]]; then
+        dl_install "${aria2_conf_dir}/tracker.sh" "$(gh_raw_url tracker.sh)" || {
+            echo -e "${Error} tracker.sh 下载失败，无法开启自动更新 !"
+            return 1
+        }
+        chmod +x "${aria2_conf_dir}/tracker.sh"
+    fi
     crontab -l >"/tmp/crontab.bak"
     sed -i "/aria2.sh update-bt-tracker/d" "/tmp/crontab.bak"
     sed -i "/tracker.sh/d" "/tmp/crontab.bak"
@@ -980,8 +992,11 @@ Add_iptables() {
     iptables -I INPUT -m state --state NEW -m udp -p udp --dport ${aria2_dht_port} -j ACCEPT
 }
 Del_iptables() {
+    # 必须用 aria2_port（配置文件里的当前端口）：修改 RPC 端口时 aria2_RPC_port 已经是新端口，
+    # 旧规则要用旧端口删；卸载时 aria2_RPC_port 根本没赋值。
+    # Add_iptables 用的才是 aria2_RPC_port（新端口）。
     for source in ${rpc_allow_source}; do
-        iptables -D INPUT -m state --state NEW -m tcp -p tcp -s ${source} --dport ${aria2_RPC_port} -j ACCEPT 2>/dev/null
+        iptables -D INPUT -m state --state NEW -m tcp -p tcp -s ${source} --dport ${aria2_port} -j ACCEPT 2>/dev/null
     done
     iptables -D INPUT -m state --state NEW -m tcp -p tcp --dport ${aria2_bt_port} -j ACCEPT 2>/dev/null
     iptables -D INPUT -m state --state NEW -m udp -p udp --dport ${aria2_dht_port} -j ACCEPT 2>/dev/null
