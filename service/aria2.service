@@ -1,0 +1,16 @@
+[Unit]
+Description=Aria2 download daemon
+Documentation=https://aria2.github.io/manual/en/html/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 日志仍然写回 aria2.sh 里的 aria2_log 路径，保证菜单「查看日志」可用。
+# 这里用 shell 重定向而不是 StandardOutput=append:，是为了兼容 systemd 219（CentOS 7）。
+ExecStart=/bin/sh -c 'exec /usr/local/bin/aria2c --conf-path=/root/.aria2c/aria2.conf >>/root/.aria2c/aria2.log 2>&1'
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
