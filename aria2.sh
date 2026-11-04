@@ -9,10 +9,13 @@
 # https://github.com/P3TERX/aria2.sh
 # Description: Aria2 One-click installation management script
 # System Required: CentOS/Debian/Ubuntu
-# Version: 2.7.4
+# Version: 2.7.5
 #
 
-sh_ver="2.7.4"
+sh_ver="2.7.5"
+# 脚本自身绝对路径。Download_aria2_conf 里有 cd 操作，之后再用 $0 是相对路径会解析错位置。
+self_path="$(readlink -f "$0" 2>/dev/null)"
+[[ -n ${self_path} ]] || self_path="$0"
 export PATH=~/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/sbin:/bin
 aria2_conf_dir="/root/.aria2c"
 download_path="/root/downloads"
@@ -84,6 +87,11 @@ check_sys() {
 check_installed_status() {
     [[ ! -e ${aria2c} ]] && echo -e "${Error} Aria2 没有安装，请检查 !" && exit 1
     [[ ! -e ${aria2_conf} ]] && echo -e "${Error} Aria2 配置文件不存在，请检查 !" && [[ $1 != "un" ]] && exit 1
+}
+check_systemd() {
+    # /run/systemd/system 存在才说明 systemd 是 PID 1。
+    # 容器里经常有 systemctl 命令但没有 systemd，所以不能只判断命令是否存在。
+    [[ -d /run/systemd/system ]] && command -v systemctl >/dev/null 2>&1
 }
 check_crontab_installed_status() {
     if [[ ! -e ${Crontab_file} ]]; then
@@ -291,7 +299,7 @@ Download_aria2_conf() {
     # 配置文件：重置时会被覆盖
     CONF_LIST="aria2.conf script.conf rclone.env"
     # 功能脚本与数据文件：始终保留本地版本，仅在缺失时补齐
-    SCRIPT_LIST="core clean.sh delete.sh move.sh upload.sh LICENSE dht.dat dht6.dat tracker.sh"
+    SCRIPT_LIST="core clean.sh delete.sh move.sh upload.sh LICENSE dht.dat dht6.dat"
     mkdir -p "${aria2_conf_dir}" && cd "${aria2_conf_dir}"
     # 失败清理时只删本次真正需要下载的东西，不能整目录 rm -rf：
     # 目录里可能已有本地修改过的功能脚本，误删会直接丢失本地修复。
@@ -332,6 +340,39 @@ Download_aria2_conf() {
     echo -e "${Info} Aria2 完美配置下载完成！"
 }
 Service_aria2() {
+    if check_systemd; then
+        Service_aria2_systemd
+    else
+        Service_aria2_sysv
+    fi
+}
+Service_aria2_systemd() {
+    local unit="/etc/systemd/system/aria2.service"
+    dl_install "${unit}" "$(gh_raw_url "service/aria2.service")"
+    [[ ! -s ${unit} ]] && {
+        echo -e "${Error} Aria2 systemd 服务文件下载失败 !"
+        echo -e "${Tip} 可用菜单 14「设置 GitHub 代理」更换代理后重试。"
+        exit 1
+    }
+    chmod 644 "${unit}"
+
+    # 从旧版（SysV）升级过来时，先停掉并清除旧脚本，
+    # 否则 rc.d 链接会和 systemd 各起一个实例，抢同一个 session 文件和端口。
+    if [[ -e /etc/init.d/aria2 ]]; then
+        /etc/init.d/aria2 stop >/dev/null 2>&1
+        if [[ ${release} = "centos" ]]; then
+            chkconfig --del aria2 >/dev/null 2>&1
+        else
+            update-rc.d -f aria2 remove >/dev/null 2>&1
+        fi
+        rm -f /etc/init.d/aria2
+    fi
+
+    systemctl daemon-reload
+    systemctl enable aria2 >/dev/null 2>&1
+    echo -e "${Info} Aria2 systemd 服务安装完成 !"
+}
+Service_aria2_sysv() {
     local svc_name
     if [[ ${release} = "centos" ]]; then
         svc_name="aria2_centos"
@@ -375,7 +416,7 @@ Install_aria2() {
     Download_aria2
     echo -e "${Info} 开始下载/安装 Aria2 完美配置..."
     Download_aria2_conf
-    echo -e "${Info} 开始下载/安装 服务脚本(init)..."
+    echo -e "${Info} 开始下载/安装 服务脚本(systemd/SysV)..."
     Service_aria2
     Read_config
     aria2_RPC_port=${aria2_port}
@@ -395,13 +436,17 @@ Install_aria2() {
 }
 
 # 检测开机自启是否已开启。
-# 通过 /etc/rc?.d/ 下的启动软链接判断，CentOS(chkconfig) 与 Debian/Ubuntu(update-rc.d)
-# 管理的都是同一套 SysV 软链接，因此无需区分发行版。
+# systemd 环境用 systemctl is-enabled 判断；SysV 环境通过 /etc/rc?.d/ 下的启动软链接判断，
+# CentOS(chkconfig) 与 Debian/Ubuntu(update-rc.d) 管理的都是同一套软链接，因此无需区分发行版。
 # 注意：不能用 `ls /etc/rc?.d/S*aria2 /etc/rc.d/rc?.d/S*aria2` 这种多 glob 写法——
 # 在 Debian/Ubuntu 上 /etc/rc.d/rc?.d 不存在，该 glob 无法展开会成为字面量，
 # ls 因它报错返回非 0，导致软链接明明存在也被误判为“未开启”。
 check_autostart_status() {
-    [[ -n "$(find /etc/rc?.d /etc/rc.d/rc?.d -maxdepth 1 -name 'S*aria2' -print -quit 2>/dev/null)" ]]
+    if check_systemd; then
+        systemctl is-enabled --quiet aria2 2>/dev/null
+    else
+        [[ -n "$(find /etc/rc?.d /etc/rc.d/rc?.d -maxdepth 1 -name 'S*aria2' -print -quit 2>/dev/null)" ]]
+    fi
 }
 
 Start_auto() {
@@ -431,7 +476,9 @@ Start_auto() {
 Start_auto_open() {
     echo -e "${Info} 添加开机自启服务..."
     local out rc
-    if [[ ${release} = "centos" ]]; then
+    if check_systemd; then
+        out=$(systemctl enable aria2 2>&1); rc=$?
+    elif [[ ${release} = "centos" ]]; then
         out=$(chkconfig aria2 on 2>&1); rc=$?
     else
         out=$(update-rc.d aria2 defaults 2>&1); rc=$?
@@ -440,29 +487,45 @@ Start_auto_open() {
     # 否则界面显示“已开启”而实际没设置，重启后不会自动启动。
     if [[ ${rc} -eq 0 ]] && check_autostart_status; then
         echo -e "${Info} 打开自启服务成功..."
-        /etc/init.d/aria2 start
+        if check_systemd; then
+            systemctl start aria2 >/dev/null 2>&1
+        else
+            /etc/init.d/aria2 start
+        fi
         # 显式返回：自启配置已成功，不因后续 start 的结果影响本次操作的成败判定
         return 0
     else
         echo -e "${Error} 设置开机自启失败！"
         [[ -n ${out} ]] && echo -e "      命令返回: ${out}"
-        [[ ! -e /etc/init.d/aria2 ]] && echo -e "      原因: /etc/init.d/aria2 不存在，请先执行菜单 1 安装"
-        [[ ! -x /etc/init.d/aria2 && -e /etc/init.d/aria2 ]] && echo -e "      原因: /etc/init.d/aria2 没有执行权限（chmod +x）"
-        echo -e "${Tip} 可手动执行以下命令排查："
-        [[ ${release} = "centos" ]] && echo -e "      chkconfig aria2 on" || echo -e "      update-rc.d aria2 defaults"
+        if check_systemd; then
+            [[ ! -e /etc/systemd/system/aria2.service ]] && echo -e "      原因: systemd 服务文件不存在，请先执行菜单 1 安装"
+            echo -e "${Tip} 可手动执行以下命令排查："
+            echo -e "      systemctl enable aria2"
+        else
+            [[ ! -e /etc/init.d/aria2 ]] && echo -e "      原因: /etc/init.d/aria2 不存在，请先执行菜单 1 安装"
+            [[ ! -x /etc/init.d/aria2 && -e /etc/init.d/aria2 ]] && echo -e "      原因: /etc/init.d/aria2 没有执行权限（chmod +x）"
+            echo -e "${Tip} 可手动执行以下命令排查："
+            [[ ${release} = "centos" ]] && echo -e "      chkconfig aria2 on" || echo -e "      update-rc.d aria2 defaults"
+        fi
         return 1
     fi
 }
 Start_auto_stop() {
     echo -e "${Info} 删除开机自启服务..."
-    if [[ ${release} = "centos" ]]; then
+    if check_systemd; then
+        systemctl disable aria2 >/dev/null 2>&1
+    elif [[ ${release} = "centos" ]]; then
         chkconfig aria2 off
     else
         update-rc.d -f aria2 remove
     fi
     if check_autostart_status; then
-        echo -e "${Error} 取消自启服务失败，仍有自启软链接残留："
-        find /etc/rc?.d /etc/rc.d/rc?.d -maxdepth 1 -name 'S*aria2' 2>/dev/null | sed 's/^/      /'
+        echo -e "${Error} 取消自启服务失败，仍有自启配置残留："
+        if check_systemd; then
+            systemctl is-enabled aria2 2>&1 | sed 's/^/      /'
+        else
+            find /etc/rc?.d /etc/rc.d/rc?.d -maxdepth 1 -name 'S*aria2' 2>/dev/null | sed 's/^/      /'
+        fi
         return 1
     else
         echo -e "${Info} 取消自启服务成功..."
@@ -473,19 +536,32 @@ Start_aria2() {
     check_installed_status
     check_pid
     [[ ! -z ${PID} ]] && echo -e "${Error} Aria2 正在运行，请检查 !" && exit 1
-    /etc/init.d/aria2 start
+    if check_systemd; then
+        systemctl start aria2
+    else
+        /etc/init.d/aria2 start
+    fi
 }
 Stop_aria2() {
     check_installed_status
     check_pid
     [[ -z ${PID} ]] && echo -e "${Error} Aria2 没有运行，请检查 !" && exit 1
-    /etc/init.d/aria2 stop
+    if check_systemd; then
+        systemctl stop aria2
+    else
+        /etc/init.d/aria2 stop
+    fi
 }
 Restart_aria2() {
     check_installed_status
-    check_pid
-    [[ ! -z ${PID} ]] && /etc/init.d/aria2 stop
-    /etc/init.d/aria2 start
+    if check_systemd; then
+        # restart 对未运行的 unit 会自动 start，不需要先判断 PID
+        systemctl restart aria2
+    else
+        check_pid
+        [[ ! -z ${PID} ]] && /etc/init.d/aria2 stop
+        /etc/init.d/aria2 start
+    fi
 }
 Set_aria2() {
     check_installed_status
@@ -878,10 +954,16 @@ Uninstall_aria2() {
         Save_iptables
         rm -rf "${aria2c}"
         rm -rf "${aria2_conf_dir}"
+        if [[ -e /etc/systemd/system/aria2.service ]]; then
+            systemctl stop aria2 >/dev/null 2>&1
+            systemctl disable aria2 >/dev/null 2>&1
+            rm -f /etc/systemd/system/aria2.service
+            systemctl daemon-reload
+        fi
         if [[ ${release} = "centos" ]]; then
-            chkconfig --del aria2
+            chkconfig --del aria2 >/dev/null 2>&1
         else
-            update-rc.d -f aria2 remove
+            update-rc.d -f aria2 remove >/dev/null 2>&1
         fi
         rm -rf "/etc/init.d/aria2"
         echo && echo "Aria2 卸载完成 !" && echo
@@ -899,7 +981,7 @@ Add_iptables() {
 }
 Del_iptables() {
     for source in ${rpc_allow_source}; do
-        iptables -D INPUT -m state --state NEW -m tcp -p tcp -s ${source} --dport ${aria2_port} -j ACCEPT 2>/dev/null
+        iptables -D INPUT -m state --state NEW -m tcp -p tcp -s ${source} --dport ${aria2_RPC_port} -j ACCEPT 2>/dev/null
     done
     iptables -D INPUT -m state --state NEW -m tcp -p tcp --dport ${aria2_bt_port} -j ACCEPT 2>/dev/null
     iptables -D INPUT -m state --state NEW -m udp -p udp --dport ${aria2_dht_port} -j ACCEPT 2>/dev/null
@@ -949,26 +1031,25 @@ Update_Shell() {
         exit 1
     fi
     check_sys
-    if [[ -e "/etc/init.d/aria2" ]]; then
-        rm -rf /etc/init.d/aria2
-        Service_aria2
-        Restart_aria2
-    fi
+    # 服务注册统一放到脚本替换完成之后处理，避免旧版 init.d 判断逻辑
+    # 在 systemd 环境下误删/误装服务。
     if [[ -n $(crontab_update_status) ]]; then
         crontab_update_stop
     fi
     chmod +x "${shell_tmp}" && mv -f "${shell_tmp}" aria2.sh
     echo -e "${Info} 脚本已更新为最新版本 [ ${sh_new_ver} ] !"
-    # 重新下载的脚本需要重新注册服务，否则 update-rc.d/chkconfig 记录会失效
-    Service_aria2
-    Restart_aria2
+    # 重新下载的脚本需要重新注册服务，否则 update-rc.d/chkconfig/systemd 记录会失效。
+    # bash 已经把旧脚本解析进内存，直接调用 Service_aria2 仍是旧逻辑，
+    # 所以重新执行新脚本，只跑服务注册流程。未安装的机器跳过。
+    if [[ -e ${aria2c} ]]; then
+        exec bash "${self_path}" --reload-service
+    fi
     exit 0
 }
 # ==================== 代理设置 ====================
 # 把新的代理地址持久化写回本脚本顶部的 gh_proxy 变量，下次运行依然生效。
 save_gh_proxy() {
-    local new=$1 self
-    self=$(readlink -f "$0")
+    local new=$1 self="${self_path}"
     [[ -f ${self} ]] || self="aria2.sh"
     if ! grep -q '^gh_proxy=' "${self}"; then
         echo -e "${Error} 未找到可修改的 gh_proxy 配置行，请手动编辑 ${self}"
@@ -1070,6 +1151,17 @@ Set_gh_proxy() {
         esac
     done
 }
+
+# 供脚本自身更新后调用：只重新注册并重启服务，不进入交互菜单。
+# 不能在 Update_Shell 里直接调用 Service_aria2 —— 当前进程里还是旧版的函数定义。
+case "$1" in
+--reload-service)
+    check_sys
+    Service_aria2
+    Restart_aria2
+    exit 0
+    ;;
+esac
 
 echo && echo -e " Aria2 一键安装管理脚本 增强版 ${Red_font_prefix}[v${sh_ver}]${Font_color_suffix} by \033[1;35mNiter\033[0m
 
