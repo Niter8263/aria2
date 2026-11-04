@@ -161,9 +161,9 @@ check_ver_comparison() {
     read -e -p "是否更新(会中断当前下载任务) ? [Y/n] :" yn
     [[ -z "${yn}" ]] && yn="y"
     if [[ $yn == [Yy] ]]; then
-        check_pid
-        [[ ! -z $PID ]] && kill -9 ${PID}
         check_sys
+        # 不在下载前杀进程：Download_aria2 会在下载并验证成功后自己停服务，
+        # 这样下载失败时旧进程和旧二进制都不受影响。
         Download_aria2 "update"
         Start_aria2
     fi
@@ -233,40 +233,59 @@ Download_aria2() {
         echo -e "${Error} 不支持此 CPU 架构。"
         exit 1
     fi
-    # 删除旧版二进制文件。逐个文件处理，避免 rm 失败时 which 仍有输出导致死循环。
-    local old_aria2c
-    while [[ -n $(command -v aria2c) ]]; do
-        old_aria2c=$(command -v aria2c)
-        echo -e "${Info} 删除旧版 Aria2 二进制文件：${old_aria2c} ..."
-        if ! rm -vf "${old_aria2c}"; then
-            echo -e "${Error} 无法删除 ${old_aria2c}，请手动处理后重试 !"
-            exit 1
-        fi
-    done
     local bin_url="https://github.com/${gh_repo}/releases/download/${aria2_new_ver}/aria2-${aria2_new_ver%_*}-static-linux-${ARCH}.tar.gz"
     echo -e "${Info} 正在下载 Aria2 主程序（约 4.5MB，${ARCH} 架构），速度取决于所用代理..."
-    # 先下到临时文件再解压：直接管道进 tar 时若下载失败，
-    # tar 会拿到错误页并解出空文件，报错信息也会被掩盖。
-    local tmp_tar
-    tmp_tar="$(mktemp)" || exit 1
+    # 先下载到临时目录并验证，全部成功后才停服务、替换二进制。
+    # 旧实现是"先删旧版再下载"，下载/解压失败会让 aria2 直接不可用。
+    local tmp_dir tmp_tar new_bin old_aria2c
+    tmp_dir=$(mktemp -d) || exit 1
+    tmp_tar="${tmp_dir}/aria2.tar.gz"
     if ! dl_fetch "${tmp_tar}" "${bin_url}"; then
-        rm -f "${tmp_tar}"
+        rm -rf "${tmp_dir}"
         echo -e "${Error} Aria2 主程序下载失败（所有线路均不可用）!"
         echo -e "${Tip} 可用菜单 15「设置 GitHub 代理」更换代理后重试。"
         exit 1
     fi
-    if ! tar -xzf "${tmp_tar}"; then
-        rm -f "${tmp_tar}"
+    if ! tar -xzf "${tmp_tar}" -C "${tmp_dir}"; then
+        rm -rf "${tmp_dir}"
         echo -e "${Error} Aria2 压缩包解压失败，代理可能返回了异常内容 !"
         echo -e "${Tip} 可更换代理后重试：菜单 15「设置 GitHub 代理」"
         exit 1
     fi
     rm -f "${tmp_tar}"
-    [[ ! -s "aria2c" ]] && echo -e "${Error} Aria2 下载失败 !" && exit 1
-    [[ ${update_dl} = "update" ]] && rm -f "${aria2c}"
-    mv -f aria2c "${aria2c}"
+    new_bin="${tmp_dir}/aria2c"
+    if [[ ! -s ${new_bin} ]]; then
+        rm -rf "${tmp_dir}"
+        echo -e "${Error} Aria2 下载失败 !"
+        exit 1
+    fi
+    chmod +x "${new_bin}"
+    if ! "${new_bin}" -v >/dev/null 2>&1; then
+        rm -rf "${tmp_dir}"
+        echo -e "${Error} 下载的 Aria2 无法运行，已放弃安装（现有文件未改动）!"
+        exit 1
+    fi
+
+    # 下载验证通过后再停服务、清理旧二进制
+    if check_systemd && [[ -e /etc/systemd/system/aria2.service ]]; then
+        systemctl stop aria2 >/dev/null 2>&1
+    fi
+    check_pid
+    [[ -n ${PID} ]] && kill -9 "${PID}" >/dev/null 2>&1
+    # 逐个清理 PATH 里的旧版本，避免 rm 失败时 which 仍有输出导致死循环
+    while [[ -n $(command -v aria2c) ]]; do
+        old_aria2c=$(command -v aria2c)
+        echo -e "${Info} 删除旧版 Aria2 二进制文件：${old_aria2c} ..."
+        if ! rm -vf "${old_aria2c}"; then
+            rm -rf "${tmp_dir}"
+            echo -e "${Error} 无法删除 ${old_aria2c}，请手动处理后重试 !"
+            exit 1
+        fi
+    done
+    mv -f "${new_bin}" "${aria2c}"
+    rm -rf "${tmp_dir}"
     [[ ! -e ${aria2c} ]] && echo -e "${Error} Aria2 主程序安装失败！" && exit 1
-    chmod +x ${aria2c}
+    chmod +x "${aria2c}"
     echo -e "${Info} Aria2 主程序安装完成！"
 }
 # 下载单个配置文件（仅 aria2.conf / script.conf / rclone.env）。
@@ -761,7 +780,9 @@ Set_aria2_RPC_passwd() {
                 echo -e "${Error} RPC 密钥修改失败！旧密钥为：${Green_font_prefix}${aria2_passwd}${Font_color_suffix}"
             fi
         else
-            sed -i 's/^rpc-secret='${aria2_passwd}'/rpc-secret='${aria2_RPC_passwd}'/g' ${aria2_conf}
+            local esc
+            esc=$(printf '%s' "${aria2_RPC_passwd}" | sed 's/[&|]/\\&/g')
+            sed -i -E "s|^#?rpc-secret=.*|rpc-secret=${esc}|" "${aria2_conf}"
             if [[ $? -eq 0 ]]; then
                 echo -e "${Info} RPC 密钥修改成功！新密钥为：${Green_font_prefix}${aria2_RPC_passwd}${Font_color_suffix}"
                 if [[ ${read_123} != "1" ]]; then
@@ -791,6 +812,11 @@ Set_aria2_RPC_port() {
     read -e -p " 请输入新的 RPC 端口(默认: 6800): " aria2_RPC_port
     echo
     [[ -z "${aria2_RPC_port}" ]] && aria2_RPC_port="6800"
+    # 端口必须是 1-65535 的数字，否则写进配置会导致 aria2 启动失败
+    if [[ ! "${aria2_RPC_port}" =~ ^[0-9]+$ ]] || ((aria2_RPC_port < 1 || aria2_RPC_port > 65535)); then
+        echo -e "${Error} 端口必须是 1-65535 之间的数字"
+        return 1
+    fi
     if [[ "${aria2_port}" != "${aria2_RPC_port}" ]]; then
         if [[ -z "${aria2_port}" ]]; then
             echo -e "\nrpc-listen-port=${aria2_RPC_port}" >>${aria2_conf}
@@ -806,7 +832,7 @@ Set_aria2_RPC_port() {
                 echo -e "${Error} RPC 端口修改失败！旧端口为：${Green_font_prefix}${aria2_port}${Font_color_suffix}"
             fi
         else
-            sed -i 's/^rpc-listen-port='${aria2_port}'/rpc-listen-port='${aria2_RPC_port}'/g' ${aria2_conf}
+            sed -i -E "s|^#?rpc-listen-port=.*|rpc-listen-port=${aria2_RPC_port}|" "${aria2_conf}"
             if [[ $? -eq 0 ]]; then
                 echo -e "${Info} RPC 端口修改成功！新端口为：${Green_font_prefix}${aria2_RPC_port}${Font_color_suffix}"
                 Del_iptables
@@ -838,7 +864,7 @@ Set_aria2_RPC_dir() {
 "
     read -e -p " 请输入新的下载目录(默认: ${download_path}): " aria2_RPC_dir
     [[ -z "${aria2_RPC_dir}" ]] && aria2_RPC_dir="${download_path}"
-    mkdir -p ${aria2_RPC_dir}
+    mkdir -p "${aria2_RPC_dir}"
     echo
     if [[ "${aria2_dir}" != "${aria2_RPC_dir}" ]]; then
         if [[ -z "${aria2_dir}" ]]; then
@@ -853,8 +879,9 @@ Set_aria2_RPC_dir() {
             fi
         else
             # 附加功能脚本从 aria2.conf 的 dir= 读取下载目录，无需再改脚本内的变量
-            aria2_RPC_dir_2=$(echo "${aria2_RPC_dir}" | sed 's/\//\\\//g')
-            sed -i "s@^\(dir=\).*@\1${aria2_RPC_dir_2}@" ${aria2_conf}
+            local esc
+            esc=$(printf '%s' "${aria2_RPC_dir}" | sed 's/[&|]/\\&/g')
+            sed -i -E "s|^#?dir=.*|dir=${esc}|" "${aria2_conf}"
             if [[ $? -eq 0 ]]; then
                 echo -e "${Info} 下载目录修改成功！新位置为：${Green_font_prefix}${aria2_RPC_dir}${Font_color_suffix}"
                 if [[ ${read_123} != "1" ]]; then
@@ -966,7 +993,7 @@ Clean_Log() {
     echo -e "${Info} Aria2 日志已清空 !"
 }
 crontab_update_status() {
-    crontab -l | grep "tracker.sh"
+    crontab -l 2>/dev/null | grep "tracker.sh"
 }
 move_on_complete_status() {
     [[ -e ${aria2_conf} ]] || return 1
@@ -1010,7 +1037,7 @@ crontab_update_start() {
         }
         chmod +x "${aria2_conf_dir}/tracker.sh"
     fi
-    crontab -l >"/tmp/crontab.bak"
+    crontab -l 2>/dev/null >"/tmp/crontab.bak"
     sed -i "/aria2.sh update-bt-tracker/d" "/tmp/crontab.bak"
     sed -i "/tracker.sh/d" "/tmp/crontab.bak"
     echo -e "\n0 0 * * * /bin/bash ${aria2_conf_dir}/tracker.sh ${aria2_conf} RPC 2>&1 | tee ${aria2_conf_dir}/tracker.log" >>"/tmp/crontab.bak"
@@ -1024,7 +1051,7 @@ crontab_update_start() {
     fi
 }
 crontab_update_stop() {
-    crontab -l >"/tmp/crontab.bak"
+    crontab -l 2>/dev/null >"/tmp/crontab.bak"
     sed -i "/aria2.sh update-bt-tracker/d" "/tmp/crontab.bak"
     sed -i "/tracker.sh/d" "/tmp/crontab.bak"
     crontab "/tmp/crontab.bak"
@@ -1065,7 +1092,7 @@ Uninstall_aria2() {
     read -e -p "(默认: n):" unyn
     [[ -z ${unyn} ]] && unyn="n"
     if [[ ${unyn} == [Yy] ]]; then
-        crontab -l >"/tmp/crontab.bak"
+        crontab -l 2>/dev/null >"/tmp/crontab.bak"
         sed -i "/aria2.sh/d" "/tmp/crontab.bak"
         sed -i "/tracker.sh/d" "/tmp/crontab.bak"
         crontab "/tmp/crontab.bak"
@@ -1106,15 +1133,46 @@ Uninstall_aria2() {
         echo && echo "卸载已取消..." && echo
     fi
 }
+use_firewalld() {
+    [[ ${release} == "centos" ]] && command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld 2>/dev/null
+}
+add_ipt_rule() {
+    # 幂等：先删掉所有同规则的旧条目，再插入一条，避免重复安装后规则叠加
+    while iptables -C INPUT "$@" 2>/dev/null; do
+        iptables -D INPUT "$@" 2>/dev/null || break
+    done
+    iptables -I INPUT "$@"
+}
 Add_iptables() {
+    if use_firewalld; then
+        # firewalld 环境：RPC 仅放行内网来源，BT/DHT 全网放行（--permanent 即持久化）
+        local source
+        for source in ${rpc_allow_source}; do
+            firewall-cmd --permanent --add-rich-rule="rule family=\"ipv4\" source address=\"${source}\" port port=\"${aria2_RPC_port}\" protocol=\"tcp\" accept" >/dev/null 2>&1
+        done
+        firewall-cmd --permanent --add-port=${aria2_bt_port}/tcp >/dev/null 2>&1
+        firewall-cmd --permanent --add-port=${aria2_dht_port}/udp >/dev/null 2>&1
+        firewall-cmd --reload >/dev/null 2>&1
+        return 0
+    fi
     # RPC 端口仅对内网来源放行；BT/DHT 端口需要外部连通，保持全网放行。
     for source in ${rpc_allow_source}; do
-        iptables -I INPUT -m state --state NEW -m tcp -p tcp -s ${source} --dport ${aria2_RPC_port} -j ACCEPT
+        add_ipt_rule -m state --state NEW -m tcp -p tcp -s ${source} --dport ${aria2_RPC_port} -j ACCEPT
     done
-    iptables -I INPUT -m state --state NEW -m tcp -p tcp --dport ${aria2_bt_port} -j ACCEPT
-    iptables -I INPUT -m state --state NEW -m udp -p udp --dport ${aria2_dht_port} -j ACCEPT
+    add_ipt_rule -m state --state NEW -m tcp -p tcp --dport ${aria2_bt_port} -j ACCEPT
+    add_ipt_rule -m state --state NEW -m udp -p udp --dport ${aria2_dht_port} -j ACCEPT
 }
 Del_iptables() {
+    if use_firewalld; then
+        local source
+        for source in ${rpc_allow_source}; do
+            firewall-cmd --permanent --remove-rich-rule="rule family=\"ipv4\" source address=\"${source}\" port port=\"${aria2_port}\" protocol=\"tcp\" accept" >/dev/null 2>&1
+        done
+        firewall-cmd --permanent --remove-port=${aria2_bt_port}/tcp >/dev/null 2>&1
+        firewall-cmd --permanent --remove-port=${aria2_dht_port}/udp >/dev/null 2>&1
+        firewall-cmd --reload >/dev/null 2>&1
+        return 0
+    fi
     # 必须用 aria2_port（配置文件里的当前端口）：修改 RPC 端口时 aria2_RPC_port 已经是新端口，
     # 旧规则要用旧端口删；卸载时 aria2_RPC_port 根本没赋值。
     # Add_iptables 用的才是 aria2_RPC_port（新端口）。
@@ -1126,6 +1184,10 @@ Del_iptables() {
     return 0
 }
 Save_iptables() {
+    if use_firewalld; then
+        # --permanent 已经写入 firewalld 配置，无需额外保存
+        return 0
+    fi
     if [[ ${release} == "centos" ]]; then
         # 只有装了 iptables-services 才有 iptables.service；firewalld 环境下没有，
         # 此时无法用这种方式持久化，静默跳过（Set_iptables 里会提示一次）。
@@ -1135,12 +1197,16 @@ Save_iptables() {
     fi
 }
 Set_iptables() {
+    if use_firewalld; then
+        systemctl enable firewalld >/dev/null 2>&1
+        return 0
+    fi
     if [[ ${release} == "centos" ]]; then
         if systemctl list-unit-files 2>/dev/null | grep -q '^iptables\.service'; then
             service iptables save
             systemctl enable iptables >/dev/null 2>&1 || chkconfig --level 2345 iptables on
         else
-            echo -e "${Tip} 未检测到 iptables-services，防火墙规则无法持久化。"
+            echo -e "${Tip} 未检测到 iptables-services 和运行中的 firewalld，防火墙规则无法持久化。"
             echo -e "      请手动放行 TCP ${aria2_RPC_port:-6800}、TCP ${aria2_bt_port:-51413}、UDP ${aria2_dht_port:-51413}"
         fi
     else
@@ -1196,6 +1262,12 @@ Update_Shell() {
         echo -e "${Error} 下载内容异常（非有效脚本），更新已取消 !"
         rm -f "${shell_tmp}"
         exit 1
+    fi
+    # 保留当前配置的 GitHub 代理，避免升级脚本后被重置成仓库默认值
+    if [[ -n ${gh_proxy} ]]; then
+        local proxy_esc
+        proxy_esc=$(printf '%s' "${gh_proxy}" | sed 's/[&|]/\\&/g')
+        sed -i "s|^gh_proxy=.*|gh_proxy=\"${proxy_esc}\"|" "${shell_tmp}"
     fi
     check_sys
     # 服务注册统一放到脚本替换完成之后处理，避免旧版 init.d 判断逻辑
@@ -1405,7 +1477,13 @@ while true; do
     # 每个功能放到子 shell 里执行：功能内部大量使用 exit 1 做错误退出，
     # 子 shell 里的 exit 不会结束主菜单，操作失败后仍可继续选择其它功能。
     case "$num" in
-    0) ( Update_Shell ) ;;
+    0)
+        ( Update_Shell )
+        # 升级成功后用新脚本重新进入菜单，避免继续执行内存里的旧版函数
+        if [[ $? -eq 0 ]]; then
+            exec bash "${self_path}"
+        fi
+        ;;
     1) ( Install_aria2 ) ;;
     2) ( Update_aria2 ) ;;
     3) ( Uninstall_aria2 ) ;;
