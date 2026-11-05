@@ -23,9 +23,13 @@ aria2_conf="${aria2_conf_dir}/aria2.conf"
 aria2_log="${aria2_conf_dir}/aria2.log"
 script_conf="${aria2_conf_dir}/script.conf"
 aria2c="/usr/local/bin/aria2c"
-antileech_script="/usr/local/bin/antileech.sh"
+antileech_script="${aria2_conf_dir}/antileech.sh"
+antileech_conf="${aria2_conf_dir}/antileech.conf"
 antileech_unit="/etc/systemd/system/aria2-antileech.service"
 antileech_dropin_dir="/etc/systemd/system/aria2-antileech.service.d"
+# 旧版本路径，升级时迁移/清理
+antileech_legacy_script="/usr/local/bin/antileech.sh"
+antileech_legacy_conf="/etc/aria2-antileech.conf"
 Crontab_file="/usr/bin/crontab"
 # RPC 端口允许的来源网段。
 # Aria2 的 RPC 接口若暴露在公网且密钥泄漏，任何人都能添加任务、读写下载目录。
@@ -331,7 +335,7 @@ Download_aria2_conf() {
     # 功能脚本与数据文件：始终保留本地版本，仅在缺失时补齐
     # tracker.sh 必须装到 ${aria2_conf_dir}：crontab_update_start 的定时任务
     # 直接调用 ${aria2_conf_dir}/tracker.sh，之前漏装会导致每天 00:00 静默失败。
-    SCRIPT_LIST="core clean.sh delete.sh move.sh upload.sh LICENSE dht.dat dht6.dat tracker.sh"
+    SCRIPT_LIST="core clean.sh delete.sh move.sh upload.sh LICENSE dht.dat dht6.dat tracker.sh antileech.sh"
     mkdir -p "${aria2_conf_dir}" && cd "${aria2_conf_dir}"
     # 失败清理时只删本次真正需要下载的东西，不能整目录 rm -rf：
     # 目录里可能已有本地修改过的功能脚本，误删会直接丢失本地修复。
@@ -724,12 +728,54 @@ Set_move_on_complete() {
     echo -e "${Info} 已开启：下载完成后移动到 ${Green_font_prefix}${new_dest}${Font_color_suffix}"
     Restart_aria2
 }
+antileech_conf_get() {
+    local key=$1 default=$2 v=""
+    if [[ -r ${antileech_conf} ]]; then
+        v=$(grep -E "^${key}=" "${antileech_conf}" 2>/dev/null | tail -1 | cut -d= -f2-)
+        v="${v%\"}"
+        v="${v#\"}"
+    fi
+    [[ -z ${v} ]] && v=${default}
+    echo "${v}"
+}
+antileech_set_key() {
+    local key=$1 value=$2
+    if grep -qE "^${key}=" "${antileech_conf}" 2>/dev/null; then
+        sed -i -E "s|^${key}=.*|${key}=${value}|" "${antileech_conf}"
+    else
+        echo "${key}=${value}" >>"${antileech_conf}"
+    fi
+}
+antileech_write_conf() {
+    local bt=$1 pi=$2 bs=$3 bo=$4 ic=$5 dr=$6 lp=$7
+    cat >"${antileech_conf}" <<CONF
+# aria2 anti-leech configuration
+# 由 aria2.sh 菜单 16 -> 5 生成，修改后会自动重启服务
+BLOCK_TIMEOUT=${bt}
+POLL_INTERVAL=${pi}
+BLOCK_SEEDERS=${bs}
+BLOCK_OUTPUT=${bo}
+IPT_CHAIN=${ic}
+DRY_RUN=${dr}
+LEECH_PREFIXES="${lp}"
+CONF
+    chmod 600 "${antileech_conf}"
+}
+antileech_ensure_conf() {
+    [[ -e ${antileech_conf} ]] && return 0
+    # 从旧路径迁移已有配置，避免升级后配置丢失
+    if [[ -e ${antileech_legacy_conf} ]]; then
+        mv -f "${antileech_legacy_conf}" "${antileech_conf}"
+    else
+        antileech_write_conf 3600 10 0 0 INPUT 0 "-XL -SD -QD -TX -QQ"
+    fi
+}
 antileech_status() {
     if [[ ! -e ${antileech_unit} ]]; then
         echo "未安装"
     elif ! systemctl is-enabled --quiet aria2-antileech 2>/dev/null; then
         echo "已关闭"
-    elif [[ -e ${antileech_dropin_dir}/dry-run.conf ]]; then
+    elif [[ $(antileech_conf_get DRY_RUN 0) == "1" ]]; then
         echo "仅观察"
     else
         echo "已开启"
@@ -756,24 +802,31 @@ Enable_antileech() {
         echo -e "${Error} ipset 安装失败，请手动安装后重试"
         return 1
     }
-    dl_install "${antileech_script}" "$(gh_raw_url antileech.sh)" || {
-        echo -e "${Error} antileech.sh 下载失败，请检查代理设置"
-        return 1
-    }
+    # 脚本和配置放在 aria2 配置目录，缺失时才下载；更新由 --reload-service 负责
+    if [[ ! -s ${antileech_script} ]]; then
+        dl_install "${antileech_script}" "$(gh_raw_url antileech.sh)" || {
+            echo -e "${Error} antileech.sh 下载失败，请检查代理设置"
+            return 1
+        }
+    fi
     chmod 755 "${antileech_script}"
+    # 清理旧版本放在 /usr/local/bin 的副本
+    rm -f "${antileech_legacy_script}"
     dl_install "${antileech_unit}" "$(gh_raw_url "service/aria2-antileech.service")" || {
         echo -e "${Error} 反吸血服务文件下载失败"
         return 1
     }
     chmod 644 "${antileech_unit}"
 
-    # 仅观察模式用 drop-in 控制，不改主 unit
-    mkdir -p "${antileech_dropin_dir}"
+    # 配置统一写 /etc/aria2-antileech.conf，由 unit 的 EnvironmentFile 读取
+    antileech_ensure_conf
     if [[ ${mode} == "dry" ]]; then
-        printf '[Service]\nEnvironment=DRY_RUN=1\n' >"${antileech_dropin_dir}/dry-run.conf"
+        antileech_set_key DRY_RUN 1
     else
-        rm -f "${antileech_dropin_dir}/dry-run.conf"
+        antileech_set_key DRY_RUN 0
     fi
+    # 清理旧版本用过的 drop-in
+    rm -f "${antileech_dropin_dir}/dry-run.conf"
 
     systemctl daemon-reload
     systemctl enable aria2-antileech >/dev/null 2>&1
@@ -806,6 +859,15 @@ Show_antileech() {
     fi
     systemctl status aria2-antileech --no-pager 2>&1 | head -8
     echo
+    echo -e " 当前配置："
+    echo -e "   封禁时长: $(antileech_conf_get BLOCK_TIMEOUT 3600) 秒"
+    echo -e "   轮询间隔: $(antileech_conf_get POLL_INTERVAL 10) 秒"
+    echo -e "   封禁做种者: $(antileech_conf_get BLOCK_SEEDERS 0)"
+    echo -e "   阻断出站: $(antileech_conf_get BLOCK_OUTPUT 0)"
+    echo -e "   规则链: $(antileech_conf_get IPT_CHAIN INPUT)"
+    echo -e "   模式: $([[ $(antileech_conf_get DRY_RUN 0) == 1 ]] && echo 仅观察 || echo 正式封禁)"
+    echo -e "   前缀: $(antileech_conf_get LEECH_PREFIXES "-XL -SD -QD -TX -QQ")"
+    echo
     if command -v ipset >/dev/null 2>&1 && ipset list aria2_leech >/dev/null 2>&1; then
         echo -e " 当前封禁列表："
         ipset list aria2_leech | sed -n '1,12p' | sed 's/^/   /'
@@ -817,26 +879,72 @@ Show_antileech() {
     journalctl -u aria2-antileech -n 8 --no-pager 2>/dev/null | sed 's/^/   /'
     echo
 }
+Edit_antileech_config() {
+    local bt pi bs bo ic lp dr v
+    bt=$(antileech_conf_get BLOCK_TIMEOUT 3600)
+    pi=$(antileech_conf_get POLL_INTERVAL 10)
+    bs=$(antileech_conf_get BLOCK_SEEDERS 0)
+    bo=$(antileech_conf_get BLOCK_OUTPUT 0)
+    ic=$(antileech_conf_get IPT_CHAIN INPUT)
+    lp=$(antileech_conf_get LEECH_PREFIXES "-XL -SD -QD -TX -QQ")
+    dr=$(antileech_conf_get DRY_RUN 0)
+
+    echo
+    echo -e " ${Tip} 直接回车保留当前值"
+    read -e -p " 封禁时长(秒) [${bt}]: " v; [[ -n ${v} ]] && bt=${v}
+    read -e -p " 轮询间隔(秒) [${pi}]: " v; [[ -n ${v} ]] && pi=${v}
+    read -e -p " 封禁做种者 0/1 [${bs}]: " v; [[ -n ${v} ]] && bs=${v}
+    read -e -p " 同时阻断出站 0/1 [${bo}]: " v; [[ -n ${v} ]] && bo=${v}
+    read -e -p " 规则链 INPUT/DOCKER-USER [${ic}]: " v; [[ -n ${v} ]] && ic=${v}
+    read -e -p " peerId 前缀 [${lp}]: " v; [[ -n ${v} ]] && lp=${v}
+
+    [[ ${bt} =~ ^[0-9]+$ ]] || { echo -e "${Error} 封禁时长必须是数字"; return 1; }
+    [[ ${pi} =~ ^[0-9]+$ ]] || { echo -e "${Error} 轮询间隔必须是数字"; return 1; }
+    [[ ${bs} =~ ^[01]$ ]] || { echo -e "${Error} 封禁做种者只能是 0 或 1"; return 1; }
+    [[ ${bo} =~ ^[01]$ ]] || { echo -e "${Error} 阻断出站只能是 0 或 1"; return 1; }
+    [[ ${ic} == "INPUT" || ${ic} == "DOCKER-USER" ]] || { echo -e "${Error} 规则链只能是 INPUT 或 DOCKER-USER"; return 1; }
+    [[ -z ${lp} ]] && { echo -e "${Error} peerId 前缀不能为空"; return 1; }
+
+    antileech_write_conf "${bt}" "${pi}" "${bs}" "${bo}" "${ic}" "${dr}" "${lp}"
+    if systemctl is-active --quiet aria2-antileech 2>/dev/null; then
+        systemctl restart aria2-antileech
+        sleep 1
+    fi
+    echo -e "${Info} 配置已保存，当前模式：$([[ ${dr} == 1 ]] && echo 仅观察 || echo 正式封禁)"
+}
 Set_antileech() {
     check_installed_status
     check_sys
-    echo -e "
+    if [[ -t 0 ]]; then clear 2>/dev/null || true; fi
+    while true; do
+        echo -e "
  ${Green_font_prefix}1.${Font_color_suffix} 开启（正式封禁）
  ${Green_font_prefix}2.${Font_color_suffix} 开启（仅观察，不封禁）
  ${Green_font_prefix}3.${Font_color_suffix} 关闭
  ${Green_font_prefix}4.${Font_color_suffix} 查看状态 / 封禁列表
+ ${Green_font_prefix}5.${Font_color_suffix} 修改配置
  ————————————
  ${Green_font_prefix}0.${Font_color_suffix} 返回
 "
-    read -e -p " 请输入数字 [0-4]:" antileech_opt
-    case "${antileech_opt}" in
-    1) Enable_antileech normal ;;
-    2) Enable_antileech dry ;;
-    3) Disable_antileech ;;
-    4) Show_antileech ;;
-    0) return 0 ;;
-    *) echo -e " ${Error} 请输入正确的数字" ;;
-    esac
+        if ! read -e -p " 请输入数字 [0-5]:" antileech_opt; then
+            return 0
+        fi
+        case "${antileech_opt}" in
+        1) Enable_antileech normal ;;
+        2) Enable_antileech dry ;;
+        3) Disable_antileech ;;
+        4) Show_antileech ;;
+        5) Edit_antileech_config ;;
+        0) return 0 ;;
+        *) echo -e " ${Error} 请输入正确的数字" ;;
+        esac
+        # 交互模式下暂停，然后清屏回到反吸血菜单，避免输出堆叠
+        if [[ ${antileech_opt} != 0 && -t 0 ]]; then
+            echo
+            read -e -p " 按回车键返回反吸血菜单..." _
+            clear 2>/dev/null || true
+        fi
+    done
 }
 Set_aria2() {
     check_installed_status
@@ -1246,7 +1354,7 @@ Uninstall_aria2() {
             systemctl disable --now aria2-antileech >/dev/null 2>&1
             rm -f "${antileech_unit}"
             rm -rf "${antileech_dropin_dir}"
-            rm -f "${antileech_script}"
+            rm -f "${antileech_script}" "${antileech_conf}" "${antileech_legacy_script}" "${antileech_legacy_conf}"
             systemctl daemon-reload
         fi
         command -v ipset >/dev/null 2>&1 && ipset destroy aria2_leech 2>/dev/null
@@ -1662,7 +1770,8 @@ while true; do
     esac
 
     # 交互式终端下暂停再刷新菜单；管道 / 自动化执行时不阻塞
-    if [[ ${num} != 16 && -t 0 ]]; then
+    # 17 是退出选项，不需要暂停
+    if [[ ${num} != 17 && -t 0 ]]; then
         echo
         read -e -p " 按回车键返回主菜单..." _
     fi
