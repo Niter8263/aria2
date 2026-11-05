@@ -23,6 +23,9 @@ aria2_conf="${aria2_conf_dir}/aria2.conf"
 aria2_log="${aria2_conf_dir}/aria2.log"
 script_conf="${aria2_conf_dir}/script.conf"
 aria2c="/usr/local/bin/aria2c"
+antileech_script="/usr/local/bin/antileech.sh"
+antileech_unit="/etc/systemd/system/aria2-antileech.service"
+antileech_dropin_dir="/etc/systemd/system/aria2-antileech.service.d"
 Crontab_file="/usr/bin/crontab"
 # RPC 端口允许的来源网段。
 # Aria2 的 RPC 接口若暴露在公网且密钥泄漏，任何人都能添加任务、读写下载目录。
@@ -428,10 +431,10 @@ Installation_dependency() {
     if [[ ${release} = "centos" ]]; then
         # 仅刷新元数据，不做全系统升级（yum update 可能升级内核/关键组件，影响生产环境）
         yum makecache
-        yum install -y wget curl nano ca-certificates findutils jq tar gzip dpkg
+        yum install -y wget curl nano ca-certificates findutils jq tar gzip dpkg ipset
     else
         apt-get update
-        apt-get install -y wget curl nano ca-certificates findutils jq tar gzip dpkg
+        apt-get install -y wget curl nano ca-certificates findutils jq tar gzip dpkg ipset
     fi
 }
 Install_aria2() {
@@ -720,6 +723,120 @@ Set_move_on_complete() {
 
     echo -e "${Info} 已开启：下载完成后移动到 ${Green_font_prefix}${new_dest}${Font_color_suffix}"
     Restart_aria2
+}
+antileech_status() {
+    if [[ ! -e ${antileech_unit} ]]; then
+        echo "未安装"
+    elif ! systemctl is-enabled --quiet aria2-antileech 2>/dev/null; then
+        echo "已关闭"
+    elif [[ -e ${antileech_dropin_dir}/dry-run.conf ]]; then
+        echo "仅观察"
+    else
+        echo "已开启"
+    fi
+}
+ensure_ipset() {
+    command -v ipset >/dev/null 2>&1 && return 0
+    echo -e "${Info} 正在安装 ipset..."
+    if [[ ${release} = "centos" ]]; then
+        yum install -y ipset >/dev/null 2>&1
+    else
+        apt-get update -qq >/dev/null 2>&1
+        apt-get install -y -qq ipset >/dev/null 2>&1
+    fi
+    command -v ipset >/dev/null 2>&1
+}
+Enable_antileech() {
+    local mode=$1
+    if ! check_systemd; then
+        echo -e "${Error} 反吸血依赖 systemd，当前环境不支持"
+        return 1
+    fi
+    ensure_ipset || {
+        echo -e "${Error} ipset 安装失败，请手动安装后重试"
+        return 1
+    }
+    dl_install "${antileech_script}" "$(gh_raw_url antileech.sh)" || {
+        echo -e "${Error} antileech.sh 下载失败，请检查代理设置"
+        return 1
+    }
+    chmod 755 "${antileech_script}"
+    dl_install "${antileech_unit}" "$(gh_raw_url "service/aria2-antileech.service")" || {
+        echo -e "${Error} 反吸血服务文件下载失败"
+        return 1
+    }
+    chmod 644 "${antileech_unit}"
+
+    # 仅观察模式用 drop-in 控制，不改主 unit
+    mkdir -p "${antileech_dropin_dir}"
+    if [[ ${mode} == "dry" ]]; then
+        printf '[Service]\nEnvironment=DRY_RUN=1\n' >"${antileech_dropin_dir}/dry-run.conf"
+    else
+        rm -f "${antileech_dropin_dir}/dry-run.conf"
+    fi
+
+    systemctl daemon-reload
+    systemctl enable aria2-antileech >/dev/null 2>&1
+    systemctl restart aria2-antileech
+    sleep 1
+    if systemctl is-active --quiet aria2-antileech; then
+        if [[ ${mode} == "dry" ]]; then
+            echo -e "${Info} 反吸血已开启（仅观察，只记录不封禁）"
+        else
+            echo -e "${Info} 反吸血已开启（正式封禁）"
+        fi
+    else
+        echo -e "${Error} 反吸血启动失败，请执行：systemctl status aria2-antileech"
+        return 1
+    fi
+}
+Disable_antileech() {
+    if [[ -e ${antileech_unit} ]]; then
+        systemctl disable --now aria2-antileech >/dev/null 2>&1
+        echo -e "${Info} 反吸血已关闭，封禁列表已清空"
+    else
+        echo -e "${Info} 反吸血未安装"
+    fi
+}
+Show_antileech() {
+    echo
+    if [[ ! -e ${antileech_unit} ]]; then
+        echo -e " ${Tip} 反吸血未安装"
+        return 0
+    fi
+    systemctl status aria2-antileech --no-pager 2>&1 | head -8
+    echo
+    if command -v ipset >/dev/null 2>&1 && ipset list aria2_leech >/dev/null 2>&1; then
+        echo -e " 当前封禁列表："
+        ipset list aria2_leech | sed -n '1,12p' | sed 's/^/   /'
+    else
+        echo -e " ${Tip} ipset 集合不存在（服务未运行或暂无封禁）"
+    fi
+    echo
+    echo -e " 最近日志："
+    journalctl -u aria2-antileech -n 8 --no-pager 2>/dev/null | sed 's/^/   /'
+    echo
+}
+Set_antileech() {
+    check_installed_status
+    check_sys
+    echo -e "
+ ${Green_font_prefix}1.${Font_color_suffix} 开启（正式封禁）
+ ${Green_font_prefix}2.${Font_color_suffix} 开启（仅观察，不封禁）
+ ${Green_font_prefix}3.${Font_color_suffix} 关闭
+ ${Green_font_prefix}4.${Font_color_suffix} 查看状态 / 封禁列表
+ ————————————
+ ${Green_font_prefix}0.${Font_color_suffix} 返回
+"
+    read -e -p " 请输入数字 [0-4]:" antileech_opt
+    case "${antileech_opt}" in
+    1) Enable_antileech normal ;;
+    2) Enable_antileech dry ;;
+    3) Disable_antileech ;;
+    4) Show_antileech ;;
+    0) return 0 ;;
+    *) echo -e " ${Error} 请输入正确的数字" ;;
+    esac
 }
 Set_aria2() {
     check_installed_status
@@ -1124,6 +1241,16 @@ Uninstall_aria2() {
             systemctl daemon-reload
         fi
         rm -f /etc/network/if-pre-up.d/iptables
+        # 反吸血服务、封禁集合与残留规则
+        if [[ -e ${antileech_unit} ]]; then
+            systemctl disable --now aria2-antileech >/dev/null 2>&1
+            rm -f "${antileech_unit}"
+            rm -rf "${antileech_dropin_dir}"
+            rm -f "${antileech_script}"
+            systemctl daemon-reload
+        fi
+        command -v ipset >/dev/null 2>&1 && ipset destroy aria2_leech 2>/dev/null
+        iptables -D INPUT -m set --match-set aria2_leech src -j DROP 2>/dev/null
         if [[ ${release} = "centos" ]]; then
             chkconfig --del aria2 >/dev/null 2>&1
         else
@@ -1400,6 +1527,13 @@ case "$1" in
     check_sys
     Service_aria2
     Restart_aria2
+    # 反吸血已启用时同步更新脚本/服务文件并重启
+    if [[ -e ${antileech_unit} ]] && systemctl is-enabled --quiet aria2-antileech 2>/dev/null; then
+        dl_install "${antileech_script}" "$(gh_raw_url antileech.sh)" && chmod 755 "${antileech_script}"
+        dl_install "${antileech_unit}" "$(gh_raw_url "service/aria2-antileech.service")" && chmod 644 "${antileech_unit}"
+        systemctl daemon-reload
+        systemctl restart aria2-antileech
+    fi
     exit 0
     ;;
 esac
@@ -1431,7 +1565,9 @@ while true; do
  ${Green_font_prefix}14.${Font_color_suffix} 开机自启服务
  ${Green_font_prefix}15.${Font_color_suffix} 设置 GitHub 代理
  ———————————————————————
- ${Green_font_prefix}16.${Font_color_suffix} 退出脚本
+ ${Green_font_prefix}16.${Font_color_suffix} 反吸血设置
+ ———————————————————————
+ ${Green_font_prefix}17.${Font_color_suffix} 退出脚本
  ———————————————————————
 "
 
@@ -1464,6 +1600,15 @@ while true; do
         echo -e " 状态: ${Green_font_prefix}已安装${Font_color_suffix} | ${run_state} | RPC端口: ${Green_font_prefix}${conf_port}${Font_color_suffix} | 版本: ${local_ver}"
         echo
         echo -e " 自启: ${autostart_state} | 自动BT-Tracker: ${tracker_state} | 完成移动：${move_state}"
+        al_state=$(antileech_status)
+        echo
+        if [[ ${al_state} == "已开启" ]]; then
+            echo -e " 反吸血: ${Green_font_prefix}${al_state}${Font_color_suffix}"
+        elif [[ ${al_state} == "仅观察" ]]; then
+            echo -e " 反吸血: ${al_state}"
+        else
+            echo -e " 反吸血: ${Red_font_prefix}${al_state}${Font_color_suffix}"
+        fi
     else
         echo
         echo -e " 状态: ${Red_font_prefix}未安装${Font_color_suffix}"
@@ -1472,7 +1617,7 @@ while true; do
     echo -e " GitHub 代理: ${Green_font_prefix}${gh_proxy:-（未配置，直连）}${Font_color_suffix}"
     echo
 
-    if ! read -e -p " 请输入数字 [0-16]:" num; then
+    if ! read -e -p " 请输入数字 [0-17]:" num; then
         # 输入结束（管道 / EOF）时退出，避免死循环
         echo
         break
@@ -1503,7 +1648,8 @@ while true; do
     13) ( Set_move_on_complete ) ;;
     14) ( Start_auto ) ;;
     15) ( Set_gh_proxy ) ;;
-    16)
+    16) ( Set_antileech ) ;;
+    17)
         echo
         echo -e " ${Info} 已退出"
         echo
