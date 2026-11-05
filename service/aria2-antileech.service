@@ -1,0 +1,25 @@
+[Unit]
+Description=aria2 anti-leech (peer-id based ipset blocker)
+Documentation=https://github.com/Niter8263/aria2
+After=aria2.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/antileech.sh
+Restart=always
+RestartSec=5
+# 需要 root 操作 ipset / iptables
+User=root
+# 可按需覆盖默认值：
+#Environment=BLOCK_TIMEOUT=3600
+#Environment=POLL_INTERVAL=10
+#Environment=BLOCK_OUTPUT=0
+# aria2 跑在 Docker 里时改成 DOCKER-USER
+#Environment=IPT_CHAIN=INPUT
+#Environment=LEECH_PREFIXES="-XL -SD -QD -TX -QQ"
+# 只观察不封禁（验证匹配逻辑）
+#Environment=DRY_RUN=0
+
+[Install]
+WantedBy=multi-user.target
