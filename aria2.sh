@@ -12,7 +12,7 @@
 # Version: 2.7.5
 #
 
-sh_ver="2.7.5"
+sh_ver="2.7.6"
 # 脚本自身绝对路径。Download_aria2_conf 里有 cd 操作，之后再用 $0 是相对路径会解析错位置。
 self_path="$(readlink -f "$0" 2>/dev/null)"
 [[ -n ${self_path} ]] || self_path="$0"
@@ -812,13 +812,14 @@ Enable_antileech() {
     chmod 755 "${antileech_script}"
     # 清理旧版本放在 /usr/local/bin 的副本
     rm -f "${antileech_legacy_script}"
+    # unit 统一放仓库维护，安装时下载（路径：/root/.aria2c）
     dl_install "${antileech_unit}" "$(gh_raw_url "service/aria2-antileech.service")" || {
         echo -e "${Error} 反吸血服务文件下载失败"
         return 1
     }
     chmod 644 "${antileech_unit}"
 
-    # 配置统一写 /etc/aria2-antileech.conf，由 unit 的 EnvironmentFile 读取
+    # 配置由 unit 的 EnvironmentFile 读取（/root/.aria2c/antileech.conf）
     antileech_ensure_conf
     if [[ ${mode} == "dry" ]]; then
         antileech_set_key DRY_RUN 1
@@ -839,7 +840,9 @@ Enable_antileech() {
             echo -e "${Info} 反吸血已开启（正式封禁）"
         fi
     else
-        echo -e "${Error} 反吸血启动失败，请执行：systemctl status aria2-antileech"
+        echo -e "${Error} 反吸血启动失败，最近日志："
+        journalctl -u aria2-antileech -n 8 --no-pager 2>/dev/null | sed 's/^/  /'
+        echo -e "  完整信息：systemctl status aria2-antileech"
         return 1
     fi
 }
