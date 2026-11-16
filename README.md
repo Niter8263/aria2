@@ -42,47 +42,6 @@ wget -qO aria2.sh https://raw.githubusercontent.com/Niter8263/aria2/main/aria2.s
 chmod +x aria2.sh && ./aria2.sh
 ```
 
-> **已失效的地址**，请勿再使用：`https://goo.su/WmqPUe`（会跳转到已停用的 `github.moeyy.xyz`）、`git.io/*` 短链、`aria2c.now.sh`、`hub.gitmirror.com`、`mirror.ghproxy.com`。
-> 命令里不要加 `-N`：它与 `-O` 不兼容（wget 会警告 `timestamping does nothing in combination with -O`），且本脚本首次下载时本地并无旧文件可供比对时间。
-
-## 本地测试
-
-改动后建议按下面三层验证，由浅入深。
-
-**第一层：语法检查**（改完随手做，秒级）
-```
-for f in aria2.sh core clean.sh delete.sh move.sh upload.sh tracker.sh service/*; do
-  bash -n "$f" || echo "语法错误: $f"
-done
-```
-
-**第二层：钩子脚本功能测试**（不需要 root，不需要装 Aria2）
-```
-bash test/run_hook_tests.sh
-```
-`test/` 目录里的 `mock_aria2_rpc.py` 会起一个模拟的 Aria2 RPC 服务，让 `clean.sh` / `delete.sh` / `move.sh` 能像在真实环境一样被触发，从而验证：控制文件与种子文件是否按预期清理、正在下载的种子是否被正确保留、出错任务的残留文件是否删除、已完成文件是否被误删、`move.sh` 是否移动到 `dest-dir`。
-
-这套测试是有诊断能力的：把 `core` 的种子清理逻辑还原成旧版，只有对应那一项会失败，其余照常通过。
-
-**第三层：完整安装测试**（必须有 root，建议用容器或测试机，不要直接在生产上试）
-
-第二层测不到的部分需要真实系统环境：iptables 规则、init 服务注册与开机自启、crontab、apt/yum 依赖安装、以及真实的 `aria2c` 二进制。用 Docker 可以快速起一个干净环境：
-```
-docker run -it --rm --privileged -v "$PWD":/aria2 debian:12 bash
-# 容器内：
-cd /aria2 && ./aria2.sh     # 选择 1 安装
-```
-`--privileged` 是 iptables 需要的；如果不关心防火墙，用普通容器并忽略 iptables 相关报错也可以。装完重点检查：菜单能否正常显示状态、`/etc/init.d/aria2 status` 是否正常、菜单 14 改代理后能否生效、以及在 AriaNG 里能否连上 RPC。
-
-**上线前检查清单**
-- 菜单 8「查看配置」显示的 IPv4 / RPC 端口 / 密钥是否正确
-- RPC 能否从你的客户端连上（注意默认只放行内网网段，公网需改 `rpc_allow_source`）
-- 下载一个普通 HTTP 文件，确认完成后 `.aria2` 文件被清理
-- 下载一个多文件 BT 任务，确认完成后 `.torrent` 被清理、正在下载的种子还在
-- 重启机器，确认 Aria2 自动启动
-
-
-
 **GitHub 代理可随时更换。** 公共 GitHub 代理会不定期失效（旧版脚本写死的 `github.moeyy.xyz` 与 `aria2c.now.sh` 均已失效）。本脚本默认使用 `https://gh-proxy.com/`（实测下载速度优于 `ghproxy.net`，且支持版本查询 API），并会自动按 `你配置的代理 → 备用代理列表 → 直连 GitHub` 依次尝试，单条线路挂掉不影响使用；下载时会显示当前用的是第几条线路。需要更换时运行脚本选择菜单 `14. 设置 GitHub 代理`，可直接输入新代理并测试连通性，设置会写回脚本持久生效。
 
 > 已知限制：`ghproxy.net` 不转发 `api.github.com`，因此查询最新版本号时会自动跳过它（raw 文件下载不受影响）。菜单 14 的测试功能会分别报告这两项的可用性。
