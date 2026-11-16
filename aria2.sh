@@ -747,7 +747,7 @@ antileech_set_key() {
     fi
 }
 antileech_write_conf() {
-    local bt=$1 pi=$2 bs=$3 bo=$4 ic=$5 dr=$6 lp=$7
+    local bt=$1 pi=$2 bs=$3 bo=$4 ic=$5 dr=$6 lp=$7 bm=${8:-ip} ex=${9:-}
     cat >"${antileech_conf}" <<CONF
 # aria2 anti-leech configuration
 # 由 aria2.sh 菜单 16 -> 5 生成，修改后会自动重启服务
@@ -758,16 +758,31 @@ BLOCK_OUTPUT=${bo}
 IPT_CHAIN=${ic}
 DRY_RUN=${dr}
 LEECH_PREFIXES="${lp}"
+# ip=按 IP 整段封；ipport=按 IP+源端口只断该条连接（源地址被网关改写时用这个）
+BLOCK_MODE=${bm}
+# 永不封禁的地址，逗号分隔。源地址被改写时务必把网关填进来，避免误封后失联
+EXCLUDE_IPS="${ex}"
 CONF
     chmod 600 "${antileech_conf}"
 }
 antileech_ensure_conf() {
-    [[ -e ${antileech_conf} ]] && return 0
+    if [[ -e ${antileech_conf} ]]; then
+        # 旧版本配置缺少新字段时补齐默认值，避免升级后行为不一致
+        grep -qE '^BLOCK_MODE=' "${antileech_conf}" 2>/dev/null ||
+            echo "BLOCK_MODE=ip" >>"${antileech_conf}"
+        grep -qE '^EXCLUDE_IPS=' "${antileech_conf}" 2>/dev/null ||
+            echo 'EXCLUDE_IPS=""' >>"${antileech_conf}"
+        return 0
+    fi
     # 从旧路径迁移已有配置，避免升级后配置丢失
     if [[ -e ${antileech_legacy_conf} ]]; then
         mv -f "${antileech_legacy_conf}" "${antileech_conf}"
+        grep -qE '^BLOCK_MODE=' "${antileech_conf}" 2>/dev/null ||
+            echo "BLOCK_MODE=ip" >>"${antileech_conf}"
+        grep -qE '^EXCLUDE_IPS=' "${antileech_conf}" 2>/dev/null ||
+            echo 'EXCLUDE_IPS=""' >>"${antileech_conf}"
     else
-        antileech_write_conf 3600 10 0 0 INPUT 0 "-XL -SD -QD -TX -QQ"
+        antileech_write_conf 3600 10 0 0 INPUT 0 "-XL -SD -QD -TX -QQ" ip ""
     fi
 }
 antileech_status() {
@@ -870,6 +885,10 @@ Show_antileech() {
     echo -e "   规则链: $(antileech_conf_get IPT_CHAIN INPUT)"
     echo -e "   模式: $([[ $(antileech_conf_get DRY_RUN 0) == 1 ]] && echo 仅观察 || echo 正式封禁)"
     echo -e "   前缀: $(antileech_conf_get LEECH_PREFIXES "-XL -SD -QD -TX -QQ")"
+    local ex_show
+    ex_show=$(antileech_conf_get EXCLUDE_IPS "")
+    echo -e "   封禁粒度: $(antileech_conf_get BLOCK_MODE ip)"
+    echo -e "   排除地址: ${ex_show:-（无）}"
     echo
     if command -v ipset >/dev/null 2>&1 && ipset list aria2_leech >/dev/null 2>&1; then
         echo -e " 当前封禁列表："
@@ -883,7 +902,7 @@ Show_antileech() {
     echo
 }
 Edit_antileech_config() {
-    local bt pi bs bo ic lp dr v
+    local bt pi bs bo ic lp dr bm ex v
     bt=$(antileech_conf_get BLOCK_TIMEOUT 3600)
     pi=$(antileech_conf_get POLL_INTERVAL 10)
     bs=$(antileech_conf_get BLOCK_SEEDERS 0)
@@ -891,6 +910,8 @@ Edit_antileech_config() {
     ic=$(antileech_conf_get IPT_CHAIN INPUT)
     lp=$(antileech_conf_get LEECH_PREFIXES "-XL -SD -QD -TX -QQ")
     dr=$(antileech_conf_get DRY_RUN 0)
+    bm=$(antileech_conf_get BLOCK_MODE ip)
+    ex=$(antileech_conf_get EXCLUDE_IPS "")
 
     echo
     echo -e " ${Tip} 直接回车保留当前值"
@@ -900,6 +921,11 @@ Edit_antileech_config() {
     read -e -p " 同时阻断出站 0/1 [${bo}]: " v; [[ -n ${v} ]] && bo=${v}
     read -e -p " 规则链 INPUT/DOCKER-USER [${ic}]: " v; [[ -n ${v} ]] && ic=${v}
     read -e -p " peerId 前缀 [${lp}]: " v; [[ -n ${v} ]] && lp=${v}
+    echo -e " ${Tip} 封禁粒度：ip=按 IP 整段封；ipport=按 IP+源端口只断该条连接"
+    echo -e " ${Tip} 对端地址被网关/NAT 改写（所有 peer 显示成同一个地址）时必须用 ipport"
+    echo -e " ${Tip} ipport 模式下不要把网关填进排除地址，否则等于完全不封"
+    read -e -p " 封禁粒度 ip/ipport [${bm}]: " v; [[ -n ${v} ]] && bm=${v}
+    read -e -p " 永不封禁的地址(逗号分隔，留空不排除) [${ex}]: " v; [[ -n ${v} ]] && ex=${v}
 
     [[ ${bt} =~ ^[0-9]+$ ]] || { echo -e "${Error} 封禁时长必须是数字"; return 1; }
     [[ ${pi} =~ ^[0-9]+$ ]] || { echo -e "${Error} 轮询间隔必须是数字"; return 1; }
@@ -907,8 +933,9 @@ Edit_antileech_config() {
     [[ ${bo} =~ ^[01]$ ]] || { echo -e "${Error} 阻断出站只能是 0 或 1"; return 1; }
     [[ ${ic} == "INPUT" || ${ic} == "DOCKER-USER" ]] || { echo -e "${Error} 规则链只能是 INPUT 或 DOCKER-USER"; return 1; }
     [[ -z ${lp} ]] && { echo -e "${Error} peerId 前缀不能为空"; return 1; }
+    [[ ${bm} == "ip" || ${bm} == "ipport" ]] || { echo -e "${Error} 封禁粒度只能是 ip 或 ipport"; return 1; }
 
-    antileech_write_conf "${bt}" "${pi}" "${bs}" "${bo}" "${ic}" "${dr}" "${lp}"
+    antileech_write_conf "${bt}" "${pi}" "${bs}" "${bo}" "${ic}" "${dr}" "${lp}" "${bm}" "${ex}"
     if systemctl is-active --quiet aria2-antileech 2>/dev/null; then
         systemctl restart aria2-antileech
         sleep 1

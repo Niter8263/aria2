@@ -24,14 +24,72 @@
 * 更好的 PT 下载支持
 
 ## 部署方法
-* 下载脚本
 ```
-wget -N -O aria2.sh https://goo.su/cQVSsi && chmod +x aria2.sh
+# 直连（可用时优先）
+wget -O aria2.sh https://raw.githubusercontent.com/Niter8263/aria2/main/aria2.sh
+
+# 若直连不通，任选一个可用的加速地址（实测 2026-09 有效）
+wget -O aria2.sh https://gh-proxy.com/https://raw.githubusercontent.com/Niter8263/aria2/main/aria2.sh
+wget -O aria2.sh https://ghfast.top/https://raw.githubusercontent.com/Niter8263/aria2/main/aria2.sh
+wget -O aria2.sh https://ghproxy.net/https://raw.githubusercontent.com/Niter8263/aria2/main/aria2.sh
+
+# 或者一步到位：直连失败自动改用加速地址
+wget -qO aria2.sh https://raw.githubusercontent.com/Niter8263/aria2/main/aria2.sh ||
+  wget -qO aria2.sh https://gh-proxy.com/https://raw.githubusercontent.com/Niter8263/aria2/main/aria2.sh
 ```
 * 运行脚本
 ```
-./aria2.sh
+chmod +x aria2.sh && ./aria2.sh
 ```
+
+> **已失效的地址**，请勿再使用：`https://goo.su/WmqPUe`（会跳转到已停用的 `github.moeyy.xyz`）、`git.io/*` 短链、`aria2c.now.sh`、`hub.gitmirror.com`、`mirror.ghproxy.com`。
+> 命令里不要加 `-N`：它与 `-O` 不兼容（wget 会警告 `timestamping does nothing in combination with -O`），且本脚本首次下载时本地并无旧文件可供比对时间。
+
+## 本地测试
+
+改动后建议按下面三层验证，由浅入深。
+
+**第一层：语法检查**（改完随手做，秒级）
+```
+for f in aria2.sh core clean.sh delete.sh move.sh upload.sh tracker.sh service/*; do
+  bash -n "$f" || echo "语法错误: $f"
+done
+```
+
+**第二层：钩子脚本功能测试**（不需要 root，不需要装 Aria2）
+```
+bash test/run_hook_tests.sh
+```
+`test/` 目录里的 `mock_aria2_rpc.py` 会起一个模拟的 Aria2 RPC 服务，让 `clean.sh` / `delete.sh` / `move.sh` 能像在真实环境一样被触发，从而验证：控制文件与种子文件是否按预期清理、正在下载的种子是否被正确保留、出错任务的残留文件是否删除、已完成文件是否被误删、`move.sh` 是否移动到 `dest-dir`。
+
+这套测试是有诊断能力的：把 `core` 的种子清理逻辑还原成旧版，只有对应那一项会失败，其余照常通过。
+
+**第三层：完整安装测试**（必须有 root，建议用容器或测试机，不要直接在生产上试）
+
+第二层测不到的部分需要真实系统环境：iptables 规则、init 服务注册与开机自启、crontab、apt/yum 依赖安装、以及真实的 `aria2c` 二进制。用 Docker 可以快速起一个干净环境：
+```
+docker run -it --rm --privileged -v "$PWD":/aria2 debian:12 bash
+# 容器内：
+cd /aria2 && ./aria2.sh     # 选择 1 安装
+```
+`--privileged` 是 iptables 需要的；如果不关心防火墙，用普通容器并忽略 iptables 相关报错也可以。装完重点检查：菜单能否正常显示状态、`/etc/init.d/aria2 status` 是否正常、菜单 14 改代理后能否生效、以及在 AriaNG 里能否连上 RPC。
+
+**上线前检查清单**
+- 菜单 8「查看配置」显示的 IPv4 / RPC 端口 / 密钥是否正确
+- RPC 能否从你的客户端连上（注意默认只放行内网网段，公网需改 `rpc_allow_source`）
+- 下载一个普通 HTTP 文件，确认完成后 `.aria2` 文件被清理
+- 下载一个多文件 BT 任务，确认完成后 `.torrent` 被清理、正在下载的种子还在
+- 重启机器，确认 Aria2 自动启动
+
+
+
+**GitHub 代理可随时更换。** 公共 GitHub 代理会不定期失效（旧版脚本写死的 `github.moeyy.xyz` 与 `aria2c.now.sh` 均已失效）。本脚本默认使用 `https://gh-proxy.com/`（实测下载速度优于 `ghproxy.net`，且支持版本查询 API），并会自动按 `你配置的代理 → 备用代理列表 → 直连 GitHub` 依次尝试，单条线路挂掉不影响使用；下载时会显示当前用的是第几条线路。需要更换时运行脚本选择菜单 `14. 设置 GitHub 代理`，可直接输入新代理并测试连通性，设置会写回脚本持久生效。
+
+> 已知限制：`ghproxy.net` 不转发 `api.github.com`，因此查询最新版本号时会自动跳过它（raw 文件下载不受影响）。菜单 14 的测试功能会分别报告这两项的可用性。
+
+**RPC 访问范围默认限制在内网。** 为降低风险，安装时写入的 iptables 规则只放行内网网段（`192.168.0.0/16`、`10.0.0.0/8`、`172.16.0.0/12`、`127.0.0.1/8`）访问 RPC 端口。若需要从公网访问，请修改脚本顶部的 `rpc_allow_source` 变量，改成你的固定 IP 或 `0.0.0.0/0`（后者等同于不限制，请自行评估风险，建议配合 Nginx 反代 + HTTPS）。
+
+**选项 `7 → 0 重置/更新配置` 只刷新配置文件。** 该操作会重新下载 `aria2.conf`、`script.conf`、`rclone.env` 三个配置文件并恢复为仓库中的版本；`core`、`clean.sh`、`delete.sh`、`move.sh`、`upload.sh` 等功能脚本**不做覆盖**，以保留本地修改。如需同步脚本更新，请手动替换并重新应用本地改动。
 ## 其他操作
 
 启动：`/etc/init.d/aria2 start` `|` `service aria2 start`
@@ -63,6 +121,19 @@ RPC 密钥：随机生成，可使用选项`7. 修改 配置文件`自定义
 | `move.sh`               | 文件移动脚本。在下载完成后执行([on-download-complete](https://aria2.github.io/manual/en/html/aria2c.html#cmdoption-on-download-complete))，自动将下载完成的文件移动到指定目录，并自动清理控制文件(`*.aria2`)、种子文件(`*.torrent`)和空目录。（默认不启用）                               |
 | `tracker.sh`            | BT tracker 列表更新脚本。在 Aria2 配置文件(`aria2.conf`)所在目录执行即可获取[最新 tracker 列表](https://raw.githubusercontent.com/XIU2/TrackersListCollection/master/all.txt)并添加到配置文件中。其它使用方法详见 [tracker.md](./tracker.md)                                              |
 | `dht.dat`<br>`dht6.dat` | DHT 网络节点数据文件。提升 BT 下载率和下载速度的关键之一。相关科普：《[解决 Aria2 无法下载磁力链接、BT种子和速度慢的问题](https://p3terx.com/archives/solved-aria2-cant-download-magnetic-link-bt-seed-and-slow-speed.html)》                                                             |
+
+### 反吸血（antileech）
+
+`antileech.sh` 轮询 `aria2.getPeers`，按 peerId 前缀识别迅雷等客户端，再从系统层封禁（aria2 本身没有 ban peer 的 RPC）。
+
+封禁粒度由 `antileech.conf` 的 `BLOCK_MODE` 控制：
+
+* `ip`（默认）：把来源 IP 加入 ipset，整段拦截。只有能看到真实对端 IP 时才有意义。
+* `ipport`：按来源 IP + 源端口封，只断掉那一条 peer 连接。**当端口转发或网关做了源地址改写、所有 peer 都显示成同一个地址（例如路由器地址）时，必须用这个模式**，否则按 IP 封会把正常 peer 一起打死，可能连网关一起封掉导致自己失联。
+
+`ipport` 只能止损：封的是 NAT 会话的映射端口，对方重连换端口就绕过。想根治需要让端口转发保留真实源 IP（只做 DNAT，不要叠加 SNAT / MASQUERADE）。
+
+`EXCLUDE_IPS` 是永不封禁的地址列表（逗号分隔），用于 `ip` 模式的兜底。注意 `ipport` 模式下若把网关填进去，等于完全不封。
 
 ## 遇到问题如何处理
 
