@@ -8,7 +8,10 @@ Wants=network-online.target
 Type=simple
 # 脚本和配置与 aria2 放在同一目录（/root/.aria2c）
 EnvironmentFile=-/root/.aria2c/antileech.conf
-ExecStart=/root/.aria2c/antileech.sh
+# 日志写文件而不是只进 journald：菜单「查看日志」用 tail -f 看实时，
+# 完整内容 cat 即可，和 aria2.log 的用法保持一致。
+# 用 shell 重定向而不是 StandardOutput=append:，兼容 systemd 219（CentOS 7）。
+ExecStart=/bin/bash -c 'exec /root/.aria2c/antileech.sh >>/root/.aria2c/antileech.log 2>&1'
 Restart=always
 RestartSec=5
 # 需要 root 操作 ipset / iptables
