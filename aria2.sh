@@ -838,7 +838,7 @@ antileech_write_conf() {
     local rg=${11:-0} rw=${12:-600} ru=${13:-104857600} rp=${14:-5} pw=${15:-600}
     cat >"${antileech_conf}" <<CONF
 # aria2 anti-leech configuration
-# 由 aria2.sh 菜单 16 -> 4 生成，修改后会自动重启服务
+# 由 aria2.sh 菜单 16 -> 5 生成，修改后会自动重启服务
 BLOCK_TIMEOUT=${bt}
 POLL_INTERVAL=${pi}
 BLOCK_SEEDERS=${bs}
@@ -971,6 +971,54 @@ Disable_antileech() {
         echo -e "${Info} 反吸血未安装"
     fi
 }
+Show_antileech() {
+    echo
+    if [[ ! -e ${antileech_unit} ]]; then
+        echo -e " ${Tip} 反吸血未安装"
+        return 0
+    fi
+    echo -e " 运行状态: $(systemctl is-active aria2-antileech 2>/dev/null || echo 未知) | 模式: $(antileech_status)"
+    echo
+    echo -e " 当前配置："
+    echo -e "   封禁时长: $(antileech_conf_get BLOCK_TIMEOUT 3600) 秒"
+    echo -e "   轮询间隔: $(antileech_conf_get POLL_INTERVAL 10) 秒"
+    echo -e "   封禁做种者: $(antileech_conf_get BLOCK_SEEDERS 0)"
+    echo -e "   阻断出站: $(antileech_conf_get BLOCK_OUTPUT 0)"
+    echo -e "   规则链: $(antileech_conf_get IPT_CHAIN INPUT)"
+    echo -e "   前缀: $(antileech_conf_get LEECH_PREFIXES "-XL -SD -QD -TX -QQ")"
+    echo -e "   封禁粒度: $(antileech_conf_get BLOCK_MODE ip)"
+    local ex_show mds_show pw_show rg_show
+    ex_show=$(antileech_conf_get EXCLUDE_IPS "")
+    echo -e "   排除地址: ${ex_show:-（无）}"
+    mds_show=$(antileech_conf_get MIN_DOWNLOAD_SPEED 1024)
+    if [[ ${mds_show} == "0" ]]; then
+        echo -e "   活跃放行: 关闭（只看 peerId 前缀）"
+    else
+        echo -e "   活跃放行: 对方回传 >= $(fmt_size "${mds_show}")/s 的 peer 不封"
+    fi
+    pw_show=$(antileech_conf_get PREFIX_WINDOW 600)
+    if [[ ${pw_show} == "0" ]]; then
+        echo -e "   前缀窗口: 关闭（命中前缀且当前无回传即封）"
+    else
+        echo -e "   前缀窗口: ${pw_show} 秒内完全没有回传才封"
+    fi
+    rg_show=$(antileech_conf_get RATIO_GUARD 0)
+    if [[ ${rg_show} == "1" ]]; then
+        echo -e "   只下不上: 开启（窗口 $(antileech_conf_get RATIO_WINDOW 600) 秒，" \
+            "我方上传 >= $(fmt_size "$(antileech_conf_get RATIO_MIN_UPLOAD 104857600)") 且回传 <" \
+            "$(antileech_conf_get RATIO_MIN_IN_PERCENT 5)% 时封禁）"
+    else
+        echo -e "   只下不上: 关闭"
+    fi
+    echo
+    if command -v ipset >/dev/null 2>&1 && ipset list aria2_leech >/dev/null 2>&1; then
+        echo -e " 当前封禁列表："
+        ipset list aria2_leech | sed -n '1,12p' | sed 's/^/   /'
+    else
+        echo -e " ${Tip} ipset 集合不存在（服务未运行或暂无封禁）"
+    fi
+    echo
+}
 View_antileech_log() {
     echo
     if [[ ! -s ${antileech_log} ]]; then
@@ -1061,20 +1109,22 @@ Set_antileech() {
  ${Green_font_prefix}1.${Font_color_suffix} 开启（正式封禁）
  ${Green_font_prefix}2.${Font_color_suffix} 开启（仅观察，不封禁）
  ${Green_font_prefix}3.${Font_color_suffix} 关闭
- ${Green_font_prefix}4.${Font_color_suffix} 修改配置
- ${Green_font_prefix}5.${Font_color_suffix} 查看日志（实时）
+ ${Green_font_prefix}4.${Font_color_suffix} 查看状态 / 封禁列表
+ ${Green_font_prefix}5.${Font_color_suffix} 修改配置
+ ${Green_font_prefix}6.${Font_color_suffix} 查看日志（实时）
  ————————————
  ${Green_font_prefix}0.${Font_color_suffix} 返回
 "
-        if ! read -e -p " 请输入数字 [0-5]:" antileech_opt; then
+        if ! read -e -p " 请输入数字 [0-6]:" antileech_opt; then
             return 0
         fi
         case "${antileech_opt}" in
         1) Enable_antileech normal ;;
         2) Enable_antileech dry ;;
         3) Disable_antileech ;;
-        4) Edit_antileech_config ;;
-        5) View_antileech_log ;;
+        4) Show_antileech ;;
+        5) Edit_antileech_config ;;
+        6) View_antileech_log ;;
         0) return 0 ;;
         *) echo -e " ${Error} 请输入正确的数字" ;;
         esac
