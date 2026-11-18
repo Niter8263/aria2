@@ -32,6 +32,9 @@
 #                   设 0 关闭该保护（只看 peerId 前缀，行为与旧版一致）
 #   BLOCK_OUTPUT    1=同时阻断出站，默认 0（只阻断入站）
 #   LEECH_PREFIXES  要封的 peerId 前缀，默认 "-XL -SD -QD -TX -QQ"
+#   PREFIX_WINDOW   命中前缀后的观察窗口（秒），默认 600
+#                   窗口内完全没有回传才封禁；期间有任何回传就重新开始计时。
+#                   设为 0 恢复旧行为：命中前缀且当前没有回传就立即封禁。
 #
 # 只下不上判定（RATIO_GUARD，默认关闭）：
 #   不看客户端名，按"我方上传给它 / 它下载给我"的累计比例识别纯吸血。
@@ -58,6 +61,9 @@ BLOCK_OUTPUT="${BLOCK_OUTPUT:-0}"
 # 规则插入的链：裸机用 INPUT；aria2 在 Docker 里用 DOCKER-USER（需 host 网络或端口映射）
 IPT_CHAIN="${IPT_CHAIN:-INPUT}"
 LEECH_PREFIXES="${LEECH_PREFIXES:--XL -SD -QD -TX -QQ}"
+# 命中前缀后的观察窗口：窗口内完全没有回传才封，0=立即封（旧行为）
+PREFIX_WINDOW="${PREFIX_WINDOW:-600}"
+[[ ${PREFIX_WINDOW} =~ ^[0-9]+$ ]] || PREFIX_WINDOW=600
 # 只下不上判定：0=关闭，1=启用
 RATIO_GUARD="${RATIO_GUARD:-0}"
 RATIO_WINDOW="${RATIO_WINDOW:-600}"
@@ -151,7 +157,7 @@ else
     fi
 fi
 
-log "started: set=${IPSET_NAME} type=${set_type} mode=${BLOCK_MODE} timeout=${BLOCK_TIMEOUT}s poll=${POLL_INTERVAL}s min-dl=${MIN_DOWNLOAD_SPEED}B/s prefixes='${LEECH_PREFIXES}'"
+log "started: set=${IPSET_NAME} type=${set_type} mode=${BLOCK_MODE} timeout=${BLOCK_TIMEOUT}s poll=${POLL_INTERVAL}s min-dl=${MIN_DOWNLOAD_SPEED}B/s prefix-window=${PREFIX_WINDOW}s prefixes='${LEECH_PREFIXES}'"
 [[ -n ${EXCLUDE_IPS} ]] && log "exclude: ${EXCLUDE_IPS}"
 
 rpc_call() {
@@ -168,7 +174,9 @@ url_decode() {
         s="${s#*%}"
         hex="${s:0:2}"
         if [[ ${hex} =~ ^[0-9A-Fa-f]{2}$ ]]; then
-            out+="$(printf "\\x${hex}")"
+            # 0x00 无法存进 bash 字符串，printf 出来还会让命令替换报
+            # "ignored null byte in input"。peerId 里常见，对前缀匹配无影响，直接跳过。
+            [[ ${hex} != "00" ]] && out+="$(printf "\\x${hex}")"
             s="${s:2}"
         else
             out+="%"
@@ -309,6 +317,46 @@ ratio_gc() {
     done
 }
 
+# ==================== 前缀观察窗口 ====================
+# 命中吸血前缀后不立刻封，先观察 PREFIX_WINDOW 秒：
+# 这段时间内对方完全没有回传才封；有任何回传就重新开始计时。
+# 与 RATIO 的状态分开维护，避免两条规则互相重置对方的计时。
+declare -A PW_FIRST=() PW_IN=() PW_LAST=()
+
+pw_reset() {
+    unset "PW_FIRST[$1]" "PW_IN[$1]" "PW_LAST[$1]"
+}
+
+pw_accum() {
+    local ip=$1 down=$2 now=$3
+    [[ ${ip} =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 0
+    [[ ${down} =~ ^[0-9]+$ ]] || down=0
+    [[ -z ${PW_FIRST[${ip}]:-} ]] && PW_FIRST[${ip}]=${now}
+    PW_LAST[${ip}]=${now}
+    PW_IN[${ip}]=$(( ${PW_IN[${ip}]:-0} + down * POLL_INTERVAL ))
+}
+
+# 窗口到期且期间没有任何回传时返回 0（应封禁）；否则返回 1 并重置计时
+pw_eval() {
+    local ip=$1 now=$2 first
+    first=${PW_FIRST[${ip}]:-}
+    [[ -z ${first} ]] && return 1
+    (( now - first >= PREFIX_WINDOW )) || return 1
+    if (( ${PW_IN[${ip}]:-0} <= 0 )); then
+        return 0
+    fi
+    # 本窗口有回传，重新计时
+    pw_reset "${ip}"
+    return 1
+}
+
+pw_gc() {
+    local ip now=$1
+    for ip in "${!PW_LAST[@]}"; do
+        (( now - PW_LAST[${ip}] > PREFIX_WINDOW * 2 )) && pw_reset "${ip}"
+    done
+}
+
 while true; do
     scan_active
     now=$(date +%s)
@@ -316,6 +364,8 @@ while true; do
         downloading=${ACTIVE_DOWNLOADING[${gid}]:-0}
         while IFS=$'\t' read -r pid ip port seeder up down; do
             [[ -z ${ip:-} ]] && continue
+            # 前缀观察窗口：对所有 peer 累计"对方回传"的字节，供命中前缀后判定
+            ((PREFIX_WINDOW > 0)) && pw_accum "${ip}" "${down:-0}" "${now}"
             # 只下不上判定：只在本任务还没下完时评估。
             # 自己已完成（做种中）时所有 peer 都不会回传，评估会把整个 swarm 封掉。
             if [[ ${RATIO_GUARD} == 1 && ${downloading} == 1 ]]; then
@@ -332,20 +382,30 @@ while true; do
             [[ -z ${matched} ]] && continue
             # 默认放行做种者：迅雷偶尔也会上传，做种的对我们有利
             [[ ${BLOCK_SEEDERS} == 0 && ${seeder} == "true" ]] && continue
-            # 正在给我方传数据的 peer 放行：它此刻是有用的源，不是纯吸血。
-            # 迅雷常一边大量下载一边回传，只按 peerId 一刀切会误伤。
+            # 此刻正在回传的 peer 放行，并重新开始计时（避免刚恢复传输就被断）
             if [[ ${MIN_DOWNLOAD_SPEED} =~ ^[0-9]+$ ]] && ((MIN_DOWNLOAD_SPEED > 0)) &&
                 [[ ${down:-0} =~ ^[0-9]+$ ]] && ((down >= MIN_DOWNLOAD_SPEED)); then
                 if [[ ${DRY_RUN} == 1 && -z ${SKIP_SEEN[${ip}:${port}]:-} ]]; then
                     SKIP_SEEN["${ip}:${port}"]=1
                     log "skip ${ip}:${port} (peerId=${pid_dec:0:8}) 对方回传 ${down} B/s"
                 fi
+                pw_reset "${ip}"
                 continue
             fi
+            # 窗口制：命中前缀后先观察 PREFIX_WINDOW 秒，期间完全没有回传才封
+            if ((PREFIX_WINDOW > 0)); then
+                if pw_eval "${ip}" "${now}"; then
+                    block_peer "${ip}" "${port}" "peerId=${pid_dec:0:8} ${PREFIX_WINDOW}s 内无回传"
+                    pw_reset "${ip}"
+                fi
+                continue
+            fi
+            # PREFIX_WINDOW=0：旧行为，命中前缀且当前没有回传就立即封
             block_peer "${ip}" "${port}" "peerId=${pid_dec:0:8}"
         done < <(get_peers "${gid}")
     done
     [[ ${RATIO_GUARD} == 1 ]] && ratio_gc "${now}"
+    ((PREFIX_WINDOW > 0)) && pw_gc "${now}"
     # 放到后台再 wait：收到 TERM 时能立即打断 sleep 执行清理，
     # 否则要等 sleep 跑完（最多 POLL_INTERVAL 秒）才处理信号。
     sleep "${POLL_INTERVAL}" &

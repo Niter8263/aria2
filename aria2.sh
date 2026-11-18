@@ -833,7 +833,7 @@ antileech_set_key() {
 }
 antileech_write_conf() {
     local bt=$1 pi=$2 bs=$3 bo=$4 ic=$5 dr=$6 lp=$7 bm=${8:-ip} ex=${9:-} mds=${10:-1024}
-    local rg=${11:-0} rw=${12:-600} ru=${13:-104857600} rp=${14:-5}
+    local rg=${11:-0} rw=${12:-600} ru=${13:-104857600} rp=${14:-5} pw=${15:-600}
     cat >"${antileech_conf}" <<CONF
 # aria2 anti-leech configuration
 # 由 aria2.sh 菜单 16 -> 5 生成，修改后会自动重启服务
@@ -850,6 +850,8 @@ BLOCK_MODE=${bm}
 EXCLUDE_IPS="${ex}"
 # peer 正在给我方传数据（下载速度 >= 此值，字节/秒）时不封；0=不启用该保护
 MIN_DOWNLOAD_SPEED=${mds}
+# 命中 peerId 前缀后的观察窗口（秒），期间完全没有回传才封；0=命中即封
+PREFIX_WINDOW=${pw}
 # 只下不上判定：不看客户端名，按"我方上传 / 它下载给我"的累计比例识别纯吸血
 RATIO_GUARD=${rg}
 RATIO_WINDOW=${rw}
@@ -863,7 +865,8 @@ antileech_ensure_conf() {
     if [[ -e ${antileech_conf} ]]; then
         # 旧版本配置缺少新字段时补齐默认值，避免升级后行为不一致
         for key in BLOCK_MODE=ip EXCLUDE_IPS='""' MIN_DOWNLOAD_SPEED=1024 \
-            RATIO_GUARD=0 RATIO_WINDOW=600 RATIO_MIN_UPLOAD=104857600 RATIO_MIN_IN_PERCENT=5; do
+            RATIO_GUARD=0 RATIO_WINDOW=600 RATIO_MIN_UPLOAD=104857600 RATIO_MIN_IN_PERCENT=5 \
+            PREFIX_WINDOW=600; do
             grep -qE "^${key%%=*}=" "${antileech_conf}" 2>/dev/null ||
                 echo "${key}" >>"${antileech_conf}"
         done
@@ -873,12 +876,13 @@ antileech_ensure_conf() {
     if [[ -e ${antileech_legacy_conf} ]]; then
         mv -f "${antileech_legacy_conf}" "${antileech_conf}"
         for key in BLOCK_MODE=ip EXCLUDE_IPS='""' MIN_DOWNLOAD_SPEED=1024 \
-            RATIO_GUARD=0 RATIO_WINDOW=600 RATIO_MIN_UPLOAD=104857600 RATIO_MIN_IN_PERCENT=5; do
+            RATIO_GUARD=0 RATIO_WINDOW=600 RATIO_MIN_UPLOAD=104857600 RATIO_MIN_IN_PERCENT=5 \
+            PREFIX_WINDOW=600; do
             grep -qE "^${key%%=*}=" "${antileech_conf}" 2>/dev/null ||
                 echo "${key}" >>"${antileech_conf}"
         done
     else
-        antileech_write_conf 3600 10 0 0 INPUT 0 "-XL -SD -QD -TX -QQ" ip "" 1024 0 600 104857600 5
+        antileech_write_conf 3600 10 0 0 INPUT 0 "-XL -SD -QD -TX -QQ" ip "" 1024 0 600 104857600 5 600
     fi
 }
 antileech_status() {
@@ -981,8 +985,9 @@ Show_antileech() {
     echo -e "   规则链: $(antileech_conf_get IPT_CHAIN INPUT)"
     echo -e "   模式: $([[ $(antileech_conf_get DRY_RUN 0) == 1 ]] && echo 仅观察 || echo 正式封禁)"
     echo -e "   前缀: $(antileech_conf_get LEECH_PREFIXES "-XL -SD -QD -TX -QQ")"
-    local ex_show mds_show
+    local ex_show mds_show pw_show
     ex_show=$(antileech_conf_get EXCLUDE_IPS "")
+    pw_show=$(antileech_conf_get PREFIX_WINDOW 600)
     echo -e "   封禁粒度: $(antileech_conf_get BLOCK_MODE ip)"
     echo -e "   排除地址: ${ex_show:-（无）}"
     mds_show=$(antileech_conf_get MIN_DOWNLOAD_SPEED 1024)
@@ -990,6 +995,11 @@ Show_antileech() {
         echo -e "   活跃放行: 关闭（只看 peerId 前缀）"
     else
         echo -e "   活跃放行: 对方回传 >= $(fmt_size "${mds_show}")/s 的 peer 不封"
+    fi
+    if [[ ${pw_show} == "0" ]]; then
+        echo -e "   前缀窗口: 关闭（命中前缀且当前无回传即封）"
+    else
+        echo -e "   前缀窗口: ${pw_show} 秒内完全没有回传才封"
     fi
     rg_show=$(antileech_conf_get RATIO_GUARD 0)
     if [[ ${rg_show} == "1" ]]; then
@@ -1012,7 +1022,7 @@ Show_antileech() {
     echo
 }
 Edit_antileech_config() {
-    local bt pi bs bo ic lp dr bm ex mds rg rw ru rp v
+    local bt pi bs bo ic lp dr bm ex mds rg rw ru rp pw v
     bt=$(antileech_conf_get BLOCK_TIMEOUT 3600)
     pi=$(antileech_conf_get POLL_INTERVAL 10)
     bs=$(antileech_conf_get BLOCK_SEEDERS 0)
@@ -1027,6 +1037,7 @@ Edit_antileech_config() {
     rw=$(antileech_conf_get RATIO_WINDOW 600)
     ru=$(antileech_conf_get RATIO_MIN_UPLOAD 104857600)
     rp=$(antileech_conf_get RATIO_MIN_IN_PERCENT 5)
+    pw=$(antileech_conf_get PREFIX_WINDOW 600)
 
     echo
     echo -e " ${Tip} 直接回车保留当前值"
@@ -1036,6 +1047,8 @@ Edit_antileech_config() {
     read -e -p " 同时阻断出站 0/1 [${bo}]: " v; [[ -n ${v} ]] && bo=${v}
     read -e -p " 规则链 INPUT/DOCKER-USER [${ic}]: " v; [[ -n ${v} ]] && ic=${v}
     read -e -p " peerId 前缀 [${lp}]: " v; [[ -n ${v} ]] && lp=${v}
+    echo -e " ${Tip} 前缀窗口：命中前缀后先观察这么久，期间完全没有回传才封；0=命中即封"
+    read -e -p " 前缀观察窗口(秒) [${pw}]: " v; [[ -n ${v} ]] && pw=${v}
     echo -e " ${Tip} 封禁粒度：ip=按 IP 整段封；ipport=按 IP+源端口只断该条连接"
     echo -e " ${Tip} 对端地址被网关/NAT 改写（所有 peer 显示成同一个地址）时必须用 ipport"
     echo -e " ${Tip} ipport 模式下不要把网关填进排除地址，否则等于完全不封"
@@ -1071,8 +1084,9 @@ Edit_antileech_config() {
     [[ ${ru} =~ ^[0-9]+$ ]] || { echo -e "${Error} 最少上传字节数必须是数字"; return 1; }
     [[ ${rp} =~ ^[0-9]+$ ]] || { echo -e "${Error} 回传比例下限必须是数字"; return 1; }
     ((rp <= 100)) || { echo -e "${Error} 回传比例下限不能超过 100"; return 1; }
+    [[ ${pw} =~ ^[0-9]+$ ]] || { echo -e "${Error} 前缀观察窗口必须是数字"; return 1; }
 
-    antileech_write_conf "${bt}" "${pi}" "${bs}" "${bo}" "${ic}" "${dr}" "${lp}" "${bm}" "${ex}" "${mds}" "${rg}" "${rw}" "${ru}" "${rp}"
+    antileech_write_conf "${bt}" "${pi}" "${bs}" "${bo}" "${ic}" "${dr}" "${lp}" "${bm}" "${ex}" "${mds}" "${rg}" "${rw}" "${ru}" "${rp}" "${pw}"
     if systemctl is-active --quiet aria2-antileech 2>/dev/null; then
         systemctl restart aria2-antileech
         sleep 1
