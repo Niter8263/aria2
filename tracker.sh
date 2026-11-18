@@ -48,9 +48,9 @@ GET_TRACKERS() {
     if [[ -z "${CUSTOM_TRACKER_URL}" ]]; then
         echo && echo -e "$(DATE_TIME) ${INFO} Get BT trackers..."
         TRACKER=$(
-            ${DOWNLOADER} https://cf.trackerslist.com/best_aria2.txt ||
-                ${DOWNLOADER} https://trackerslist.com/best_aria2.txt ||
-                ${DOWNLOADER} https://bitbucket.org/xiu2/trackerslistcollection/raw/master/best_aria2.txt
+            ${DOWNLOADER} https://cf.trackerslist.com/all_aria2.txt ||
+                ${DOWNLOADER} https://trackerslist.com/all_aria2.txt ||
+                ${DOWNLOADER} https://trackers.p3terx.com/all_aria2.txt
         )
     else
         echo && echo -e "$(DATE_TIME) ${INFO} Get BT trackers from url(s):${CUSTOM_TRACKER_URL} ..."
@@ -84,7 +84,11 @@ ADD_TRACKERS() {
         # 用 grep -q 判断，避免 [ -z $(grep ...) ] 在无输出时退化成 [ -z ]、
         # 有输出时又因词分割被拆成多个参数的问题
         grep -q "^bt-tracker=" "${ARIA2_CONF}" || echo "bt-tracker=" >>"${ARIA2_CONF}"
-        sed -i "s@^\(bt-tracker=\).*@\1${TRACKER}@" ${ARIA2_CONF} && echo -e "$(DATE_TIME) ${INFO} BT trackers successfully added to Aria2 configuration file !"
+        # tracker URL 里可能带 & @ \ 这些 sed 特殊字符，不转义会破坏替换串，
+        # 把 bt-tracker 整行写坏（& 会被展开成整个匹配内容）
+        local TRACKER_ESC
+        TRACKER_ESC=$(printf '%s' "${TRACKER}" | sed 's/[&@\\]/\\&/g')
+        sed -i "s@^\(bt-tracker=\).*@\1${TRACKER_ESC}@" "${ARIA2_CONF}" && echo -e "$(DATE_TIME) ${INFO} BT trackers successfully added to Aria2 configuration file !"
 
     fi
 }

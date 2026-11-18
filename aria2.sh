@@ -12,7 +12,7 @@
 # Version: 2.7.5
 #
 
-sh_ver="2.7.6"
+sh_ver="2.7.7"
 # 脚本自身绝对路径。Download_aria2_conf 里有 cd 操作，之后再用 $0 是相对路径会解析错位置。
 self_path="$(readlink -f "$0" 2>/dev/null)"
 [[ -n ${self_path} ]] || self_path="$0"
@@ -382,6 +382,51 @@ Service_aria2() {
         Service_aria2_sysv
     fi
 }
+
+# 日志轮转：aria2.log / tracker.log 长期运行会无限增长。
+# 必须用 copytruncate：aria2 由 shell 重定向持有日志文件，
+# rename 方式会让它继续往已被移走的旧 inode 里写，新文件永远是空的。
+Install_logrotate() {
+    [[ -d /etc/logrotate.d ]] || return 0
+    cat >/etc/logrotate.d/aria2 <<LR
+${aria2_conf_dir}/aria2.log
+${aria2_conf_dir}/tracker.log
+${aria2_conf_dir}/upload.log
+${aria2_conf_dir}/move.log {
+    weekly
+    rotate 4
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}
+LR
+    chmod 644 /etc/logrotate.d/aria2
+}
+
+# 备份配置目录：排除日志、DHT 数据、会话文件与下载控制文件，默认保留最近 7 份。
+# 生成的压缩包里含明文 rpc-secret，权限收紧到 600。
+Backup_config() {
+    local dest="${1:-/root/aria2-backup}" ts out keep=7
+    mkdir -p "${dest}" || {
+        echo -e "${Error} 无法创建备份目录: ${dest}"
+        return 1
+    }
+    ts=$(date +%Y%m%d-%H%M%S)
+    out="${dest}/aria2-conf-${ts}.tar.gz"
+    if ! tar -czf "${out}" -C "$(dirname "${aria2_conf_dir}")" \
+        --exclude='*.log' --exclude='dht.dat' --exclude='dht6.dat' \
+        --exclude='aria2.session' --exclude='*.aria2' \
+        "$(basename "${aria2_conf_dir}")"; then
+        rm -f "${out}"
+        echo -e "${Error} 备份失败"
+        return 1
+    fi
+    chmod 600 "${out}" 2>/dev/null
+    ls -1t "${dest}"/aria2-conf-*.tar.gz 2>/dev/null | tail -n +$((keep + 1)) | xargs -r rm -f
+    echo -e "${Info} 配置已备份: ${out}（保留最近 ${keep} 份）"
+}
 Service_aria2_systemd() {
     local unit="/etc/systemd/system/aria2.service"
     dl_install "${unit}" "$(gh_raw_url "service/aria2.service")"
@@ -454,6 +499,7 @@ Install_aria2() {
     Download_aria2_conf
     echo -e "${Info} 开始下载/安装 服务脚本(systemd/SysV)..."
     Service_aria2
+    Install_logrotate
     Read_config
     aria2_RPC_port=${aria2_port}
     echo -e "${Info} 开始设置 iptables 防火墙..."
@@ -747,7 +793,8 @@ antileech_set_key() {
     fi
 }
 antileech_write_conf() {
-    local bt=$1 pi=$2 bs=$3 bo=$4 ic=$5 dr=$6 lp=$7 bm=${8:-ip} ex=${9:-}
+    local bt=$1 pi=$2 bs=$3 bo=$4 ic=$5 dr=$6 lp=$7 bm=${8:-ip} ex=${9:-} mds=${10:-1024}
+    local rg=${11:-0} rw=${12:-600} ru=${13:-104857600} rp=${14:-5}
     cat >"${antileech_conf}" <<CONF
 # aria2 anti-leech configuration
 # 由 aria2.sh 菜单 16 -> 5 生成，修改后会自动重启服务
@@ -762,27 +809,37 @@ LEECH_PREFIXES="${lp}"
 BLOCK_MODE=${bm}
 # 永不封禁的地址，逗号分隔。源地址被改写时务必把网关填进来，避免误封后失联
 EXCLUDE_IPS="${ex}"
+# peer 正在给我方传数据（下载速度 >= 此值，字节/秒）时不封；0=不启用该保护
+MIN_DOWNLOAD_SPEED=${mds}
+# 只下不上判定：不看客户端名，按"我方上传 / 它下载给我"的累计比例识别纯吸血
+RATIO_GUARD=${rg}
+RATIO_WINDOW=${rw}
+RATIO_MIN_UPLOAD=${ru}
+RATIO_MIN_IN_PERCENT=${rp}
 CONF
     chmod 600 "${antileech_conf}"
 }
 antileech_ensure_conf() {
+    local key
     if [[ -e ${antileech_conf} ]]; then
         # 旧版本配置缺少新字段时补齐默认值，避免升级后行为不一致
-        grep -qE '^BLOCK_MODE=' "${antileech_conf}" 2>/dev/null ||
-            echo "BLOCK_MODE=ip" >>"${antileech_conf}"
-        grep -qE '^EXCLUDE_IPS=' "${antileech_conf}" 2>/dev/null ||
-            echo 'EXCLUDE_IPS=""' >>"${antileech_conf}"
+        for key in BLOCK_MODE=ip EXCLUDE_IPS='""' MIN_DOWNLOAD_SPEED=1024 \
+            RATIO_GUARD=0 RATIO_WINDOW=600 RATIO_MIN_UPLOAD=104857600 RATIO_MIN_IN_PERCENT=5; do
+            grep -qE "^${key%%=*}=" "${antileech_conf}" 2>/dev/null ||
+                echo "${key}" >>"${antileech_conf}"
+        done
         return 0
     fi
     # 从旧路径迁移已有配置，避免升级后配置丢失
     if [[ -e ${antileech_legacy_conf} ]]; then
         mv -f "${antileech_legacy_conf}" "${antileech_conf}"
-        grep -qE '^BLOCK_MODE=' "${antileech_conf}" 2>/dev/null ||
-            echo "BLOCK_MODE=ip" >>"${antileech_conf}"
-        grep -qE '^EXCLUDE_IPS=' "${antileech_conf}" 2>/dev/null ||
-            echo 'EXCLUDE_IPS=""' >>"${antileech_conf}"
+        for key in BLOCK_MODE=ip EXCLUDE_IPS='""' MIN_DOWNLOAD_SPEED=1024 \
+            RATIO_GUARD=0 RATIO_WINDOW=600 RATIO_MIN_UPLOAD=104857600 RATIO_MIN_IN_PERCENT=5; do
+            grep -qE "^${key%%=*}=" "${antileech_conf}" 2>/dev/null ||
+                echo "${key}" >>"${antileech_conf}"
+        done
     else
-        antileech_write_conf 3600 10 0 0 INPUT 0 "-XL -SD -QD -TX -QQ" ip ""
+        antileech_write_conf 3600 10 0 0 INPUT 0 "-XL -SD -QD -TX -QQ" ip "" 1024 0 600 104857600 5
     fi
 }
 antileech_status() {
@@ -885,10 +942,24 @@ Show_antileech() {
     echo -e "   规则链: $(antileech_conf_get IPT_CHAIN INPUT)"
     echo -e "   模式: $([[ $(antileech_conf_get DRY_RUN 0) == 1 ]] && echo 仅观察 || echo 正式封禁)"
     echo -e "   前缀: $(antileech_conf_get LEECH_PREFIXES "-XL -SD -QD -TX -QQ")"
-    local ex_show
+    local ex_show mds_show
     ex_show=$(antileech_conf_get EXCLUDE_IPS "")
     echo -e "   封禁粒度: $(antileech_conf_get BLOCK_MODE ip)"
     echo -e "   排除地址: ${ex_show:-（无）}"
+    mds_show=$(antileech_conf_get MIN_DOWNLOAD_SPEED 1024)
+    if [[ ${mds_show} == "0" ]]; then
+        echo -e "   活跃放行: 关闭（只看 peerId 前缀）"
+    else
+        echo -e "   活跃放行: 下载速度 >= ${mds_show} B/s 的 peer 不封"
+    fi
+    rg_show=$(antileech_conf_get RATIO_GUARD 0)
+    if [[ ${rg_show} == "1" ]]; then
+        echo -e "   只下不上: 开启（窗口 $(antileech_conf_get RATIO_WINDOW 600) 秒，" \
+            "我方上传 >= $(antileech_conf_get RATIO_MIN_UPLOAD 104857600) 字节且回传 <" \
+            "$(antileech_conf_get RATIO_MIN_IN_PERCENT 5)% 时封禁）"
+    else
+        echo -e "   只下不上: 关闭"
+    fi
     echo
     if command -v ipset >/dev/null 2>&1 && ipset list aria2_leech >/dev/null 2>&1; then
         echo -e " 当前封禁列表："
@@ -902,7 +973,7 @@ Show_antileech() {
     echo
 }
 Edit_antileech_config() {
-    local bt pi bs bo ic lp dr bm ex v
+    local bt pi bs bo ic lp dr bm ex mds rg rw ru rp v
     bt=$(antileech_conf_get BLOCK_TIMEOUT 3600)
     pi=$(antileech_conf_get POLL_INTERVAL 10)
     bs=$(antileech_conf_get BLOCK_SEEDERS 0)
@@ -912,6 +983,11 @@ Edit_antileech_config() {
     dr=$(antileech_conf_get DRY_RUN 0)
     bm=$(antileech_conf_get BLOCK_MODE ip)
     ex=$(antileech_conf_get EXCLUDE_IPS "")
+    mds=$(antileech_conf_get MIN_DOWNLOAD_SPEED 1024)
+    rg=$(antileech_conf_get RATIO_GUARD 0)
+    rw=$(antileech_conf_get RATIO_WINDOW 600)
+    ru=$(antileech_conf_get RATIO_MIN_UPLOAD 104857600)
+    rp=$(antileech_conf_get RATIO_MIN_IN_PERCENT 5)
 
     echo
     echo -e " ${Tip} 直接回车保留当前值"
@@ -926,6 +1002,15 @@ Edit_antileech_config() {
     echo -e " ${Tip} ipport 模式下不要把网关填进排除地址，否则等于完全不封"
     read -e -p " 封禁粒度 ip/ipport [${bm}]: " v; [[ -n ${v} ]] && bm=${v}
     read -e -p " 永不封禁的地址(逗号分隔，留空不排除) [${ex}]: " v; [[ -n ${v} ]] && ex=${v}
+    echo -e " ${Tip} 活跃放行：带宽阈值内的下载说明该 peer 正在给我传数据，不应封禁"
+    echo -e " ${Tip} 填 0 关闭该保护（只看 peerId 前缀，可能误封正在上传的迅雷）"
+    read -e -p " 活跃下载放行阈值(字节/秒) [${mds}]: " v; [[ -n ${v} ]] && mds=${v}
+    echo -e " ${Tip} 只下不上：不看客户端名，按\"我方上传给它 / 它下载给我\"的累计比例判定"
+    echo -e " ${Tip} 只在我们仍在下载的任务上评估，自己做种时自动跳过"
+    read -e -p " 开启只下不上判定 0/1 [${rg}]: " v; [[ -n ${v} ]] && rg=${v}
+    read -e -p " 观察窗口(秒) [${rw}]: " v; [[ -n ${v} ]] && rw=${v}
+    read -e -p " 窗口内最少上传字节数 [${ru}]: " v; [[ -n ${v} ]] && ru=${v}
+    read -e -p " 回传比例下限(%) [${rp}]: " v; [[ -n ${v} ]] && rp=${v}
 
     [[ ${bt} =~ ^[0-9]+$ ]] || { echo -e "${Error} 封禁时长必须是数字"; return 1; }
     [[ ${pi} =~ ^[0-9]+$ ]] || { echo -e "${Error} 轮询间隔必须是数字"; return 1; }
@@ -934,8 +1019,14 @@ Edit_antileech_config() {
     [[ ${ic} == "INPUT" || ${ic} == "DOCKER-USER" ]] || { echo -e "${Error} 规则链只能是 INPUT 或 DOCKER-USER"; return 1; }
     [[ -z ${lp} ]] && { echo -e "${Error} peerId 前缀不能为空"; return 1; }
     [[ ${bm} == "ip" || ${bm} == "ipport" ]] || { echo -e "${Error} 封禁粒度只能是 ip 或 ipport"; return 1; }
+    [[ ${mds} =~ ^[0-9]+$ ]] || { echo -e "${Error} 活跃下载放行阈值必须是非负整数"; return 1; }
+    [[ ${rg} =~ ^[01]$ ]] || { echo -e "${Error} 只下不上判定只能是 0 或 1"; return 1; }
+    [[ ${rw} =~ ^[0-9]+$ ]] || { echo -e "${Error} 观察窗口必须是数字"; return 1; }
+    [[ ${ru} =~ ^[0-9]+$ ]] || { echo -e "${Error} 最少上传字节数必须是数字"; return 1; }
+    [[ ${rp} =~ ^[0-9]+$ ]] || { echo -e "${Error} 回传比例下限必须是数字"; return 1; }
+    ((rp <= 100)) || { echo -e "${Error} 回传比例下限不能超过 100"; return 1; }
 
-    antileech_write_conf "${bt}" "${pi}" "${bs}" "${bo}" "${ic}" "${dr}" "${lp}" "${bm}" "${ex}"
+    antileech_write_conf "${bt}" "${pi}" "${bs}" "${bo}" "${ic}" "${dr}" "${lp}" "${bm}" "${ex}" "${mds}" "${rg}" "${rw}" "${ru}" "${rp}"
     if systemctl is-active --quiet aria2-antileech 2>/dev/null; then
         systemctl restart aria2-antileech
         sleep 1
@@ -1455,12 +1546,27 @@ Save_iptables() {
         # --permanent 已经写入 firewalld 配置，无需额外保存
         return 0
     fi
+    # 必须过滤掉反吸血规则：aria2-antileech 的 DROP 规则引用了 ipset 集合，
+    # 而开机时 iptables-restore 先于该服务执行，集合尚不存在会让整份恢复失败，
+    # 可能导致所有防火墙规则都没加载上。反吸血规则由服务自己启动时重建。
+    local tmp
+    tmp=$(mktemp) || return 1
+    iptables-save 2>/dev/null | grep -v 'match-set aria2_leech' >"${tmp}"
+    if [[ ! -s ${tmp} ]]; then
+        rm -f "${tmp}"
+        echo -e "${Tip} iptables 规则读取失败，未覆盖已有的持久化文件。"
+        return 1
+    fi
     if [[ ${release} == "centos" ]]; then
         # 只有装了 iptables-services 才有 iptables.service；firewalld 环境下没有，
         # 此时无法用这种方式持久化，静默跳过（Set_iptables 里会提示一次）。
-        systemctl list-unit-files 2>/dev/null | grep -q '^iptables\.service' && service iptables save
+        if systemctl list-unit-files 2>/dev/null | grep -q '^iptables\.service'; then
+            mv -f "${tmp}" /etc/sysconfig/iptables
+        else
+            rm -f "${tmp}"
+        fi
     else
-        iptables-save >/etc/iptables.up.rules
+        mv -f "${tmp}" /etc/iptables.up.rules
     fi
 }
 Set_iptables() {
@@ -1542,7 +1648,7 @@ Update_Shell() {
     if [[ -n $(crontab_update_status) ]]; then
         crontab_update_stop
     fi
-    chmod +x "${shell_tmp}" && mv -f "${shell_tmp}" aria2.sh
+    chmod +x "${shell_tmp}" && mv -f "${shell_tmp}" "${self_path:-aria2.sh}"
     echo -e "${Info} 脚本已更新为最新版本 [ ${sh_new_ver} ] !"
     # 重新下载的脚本需要重新注册服务，否则 update-rc.d/chkconfig/systemd 记录会失效。
     # bash 已经把旧脚本解析进内存，直接调用 Service_aria2 仍是旧逻辑，
@@ -1664,6 +1770,7 @@ case "$1" in
 --reload-service)
     check_sys
     Service_aria2
+    Install_logrotate
     Restart_aria2
     # 反吸血已启用时同步更新脚本/服务文件并重启
     if [[ -e ${antileech_unit} ]] && systemctl is-enabled --quiet aria2-antileech 2>/dev/null; then
@@ -1672,6 +1779,11 @@ case "$1" in
         systemctl daemon-reload
         systemctl restart aria2-antileech
     fi
+    exit 0
+    ;;
+--backup-config)
+    check_sys
+    Backup_config "${2:-}"
     exit 0
     ;;
 esac

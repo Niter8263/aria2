@@ -201,7 +201,9 @@ DELETE_TORRENT_FILES() {
             TORRENT_FOUND=1
             TORRENT_BASENAME="${TORRENT_FILE##*/}"
             # session 文件中仍引用该种子的（正在下载/等待中）予以保留
-            if grep -qi -- "${TORRENT_BASENAME%.*}" "${ARIA2_SESSION}"; then
+            # 用 -F 按字面量匹配：种子名常带 [ ] ( ) . 等正则元字符，
+            # 当模式用会被误判为正在使用，导致种子文件删不掉
+            if grep -qiF -- "${TORRENT_BASENAME%.*}" "${ARIA2_SESSION}"; then
                 echo -e "$(DATE_TIME) ${INFO} .torrent file is in use, keep it: ${TORRENT_BASENAME}"
             else
                 echo -e "$(DATE_TIME) ${INFO} Deleting .torrent file (enhanced) ..."
@@ -246,11 +248,12 @@ DELETE_EMPTY_DIR() {
 DELETE_EXCLUDE_FILE() {
     if [[ ${FILE_NUM} -gt 1 ]] && [[ -n ${MIN_SIZE} || -n ${INCLUDE_FILE} || -n ${EXCLUDE_FILE} || -n ${EXCLUDE_FILE_REGEX} || -n ${INCLUDE_FILE_REGEX} ]]; then
         echo -e "${INFO} Deleting excluded files ..."
-        [[ -n ${MIN_SIZE} ]] && find "${TASK_PATH}" -type f -size -${MIN_SIZE} -print0 | xargs -0 rm -vf
-        [[ -n ${EXCLUDE_FILE} ]] && find "${TASK_PATH}" -type f -regextype posix-extended -iregex ".*\.(${EXCLUDE_FILE})" -print0 | xargs -0 rm -vf
-        [[ -n ${INCLUDE_FILE} ]] && find "${TASK_PATH}" -type f -regextype posix-extended ! -iregex ".*\.(${INCLUDE_FILE})" -print0 | xargs -0 rm -vf
-        [[ -n ${EXCLUDE_FILE_REGEX} ]] && find "${TASK_PATH}" -type f -regextype posix-extended -iregex "${EXCLUDE_FILE_REGEX}" -print0 | xargs -0 rm -vf
-        [[ -n ${INCLUDE_FILE_REGEX} ]] && find "${TASK_PATH}" -type f -regextype posix-extended ! -iregex "${INCLUDE_FILE_REGEX}" -print0 | xargs -0 rm -vf
+        # -r：没有匹配到文件时不执行空的 rm（GNU xargs）
+        [[ -n ${MIN_SIZE} ]] && find "${TASK_PATH}" -type f -size -${MIN_SIZE} -print0 | xargs -0 -r rm -vf
+        [[ -n ${EXCLUDE_FILE} ]] && find "${TASK_PATH}" -type f -regextype posix-extended -iregex ".*\.(${EXCLUDE_FILE})" -print0 | xargs -0 -r rm -vf
+        [[ -n ${INCLUDE_FILE} ]] && find "${TASK_PATH}" -type f -regextype posix-extended ! -iregex ".*\.(${INCLUDE_FILE})" -print0 | xargs -0 -r rm -vf
+        [[ -n ${EXCLUDE_FILE_REGEX} ]] && find "${TASK_PATH}" -type f -regextype posix-extended -iregex "${EXCLUDE_FILE_REGEX}" -print0 | xargs -0 -r rm -vf
+        [[ -n ${INCLUDE_FILE_REGEX} ]] && find "${TASK_PATH}" -type f -regextype posix-extended ! -iregex "${INCLUDE_FILE_REGEX}" -print0 | xargs -0 -r rm -vf
     fi
 }
 

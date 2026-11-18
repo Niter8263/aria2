@@ -6,6 +6,8 @@
 #
 # 依赖: curl jq ipset iptables
 # 说明: aria2 没有 ban peer 的 RPC，只能识别后从系统层封 IP。
+#       注意 aria2.getPeers 返回的 peerId 是百分号编码的（%2DXL0300 => -XL0300），
+#       脚本会先解码再比对前缀，否则永远匹配不上。
 #
 # 关于封禁粒度（BLOCK_MODE）：
 #   ip      按来源 IP 整段拦截。只有能看到真实对端 IP 时才有意义。
@@ -24,8 +26,22 @@
 #   EXCLUDE_IPS     永不封禁的地址，逗号或空格分隔，默认空
 #                   源地址被改写的环境建议把网关填进来，避免误封后失去远程访问
 #   BLOCK_SEEDERS   1=连做种者一起封（不推荐），默认 0
+#   MIN_DOWNLOAD_SPEED
+#                   该 peer 给我方的下载速度 >= 此值（字节/秒）时不封，默认 1024
+#                   迅雷等客户端经常同时在给我传数据，一刀切会把有用的源一起封掉。
+#                   设 0 关闭该保护（只看 peerId 前缀，行为与旧版一致）
 #   BLOCK_OUTPUT    1=同时阻断出站，默认 0（只阻断入站）
 #   LEECH_PREFIXES  要封的 peerId 前缀，默认 "-XL -SD -QD -TX -QQ"
+#
+# 只下不上判定（RATIO_GUARD，默认关闭）：
+#   不看客户端名，按"我方上传给它 / 它下载给我"的累计比例识别纯吸血。
+#   只在我们确实还在下载的任务上评估；任务已完成（我们自己就是做种者）时跳过，
+#   否则所有 peer 都会因为不需要回传而命中。
+#   RATIO_WINDOW        观察窗口秒数，默认 600（10 分钟）
+#   RATIO_MIN_UPLOAD    窗口内我方至少给它传了这么多字节才判定，默认 104857600（100MB）
+#   RATIO_MIN_IN_PERCENT 它给我的不足我给它的百分之几就判为吸血，默认 5
+#   注意：多个 peer 共用一个出口 IP（CGNAT/机房）时状态会合并计算，
+#   与 iptables 按 IP 封禁的粒度一致，但可能连带影响同出口的正常 peer。
 #
 set -u
 
@@ -36,16 +52,26 @@ POLL_INTERVAL="${POLL_INTERVAL:-10}"
 BLOCK_MODE="${BLOCK_MODE:-ip}"
 EXCLUDE_IPS="${EXCLUDE_IPS:-}"
 BLOCK_SEEDERS="${BLOCK_SEEDERS:-0}"
+# peer 正在给我方传数据时（下载速度达到该值）不封，0 表示不启用该保护
+MIN_DOWNLOAD_SPEED="${MIN_DOWNLOAD_SPEED:-1024}"
 BLOCK_OUTPUT="${BLOCK_OUTPUT:-0}"
 # 规则插入的链：裸机用 INPUT；aria2 在 Docker 里用 DOCKER-USER（需 host 网络或端口映射）
 IPT_CHAIN="${IPT_CHAIN:-INPUT}"
 LEECH_PREFIXES="${LEECH_PREFIXES:--XL -SD -QD -TX -QQ}"
+# 只下不上判定：0=关闭，1=启用
+RATIO_GUARD="${RATIO_GUARD:-0}"
+RATIO_WINDOW="${RATIO_WINDOW:-600}"
+RATIO_MIN_UPLOAD="${RATIO_MIN_UPLOAD:-104857600}"
+RATIO_MIN_IN_PERCENT="${RATIO_MIN_IN_PERCENT:-5}"
 RPC_TIMEOUT="${RPC_TIMEOUT:-5}"
 # 1=只打印“本应封禁”的目标，不创建 ipset / 不写 iptables，用于验证匹配逻辑
 DRY_RUN="${DRY_RUN:-0}"
 declare -A DRY_SEEN=()
+declare -A SKIP_SEEN=()
 
-log() { echo "$(date '+%F %T') $*"; }
+# 日志一律写 stderr：tell_active 的 stdout 会被 mapfile 当 gid 列表读走，
+# 若告警写 stdout 会被当成 gid 吞掉。
+log() { echo "$(date '+%F %T') $*" >&2; }
 die() { log "ERROR: $*"; exit 1; }
 
 if [[ ${DRY_RUN} == 1 ]]; then
@@ -125,7 +151,7 @@ else
     fi
 fi
 
-log "started: set=${IPSET_NAME} type=${set_type} mode=${BLOCK_MODE} timeout=${BLOCK_TIMEOUT}s poll=${POLL_INTERVAL}s prefixes='${LEECH_PREFIXES}'"
+log "started: set=${IPSET_NAME} type=${set_type} mode=${BLOCK_MODE} timeout=${BLOCK_TIMEOUT}s poll=${POLL_INTERVAL}s min-dl=${MIN_DOWNLOAD_SPEED}B/s prefixes='${LEECH_PREFIXES}'"
 [[ -n ${EXCLUDE_IPS} ]] && log "exclude: ${EXCLUDE_IPS}"
 
 rpc_call() {
@@ -133,11 +159,65 @@ rpc_call() {
         "http://127.0.0.1:${rpc_port}/jsonrpc"
 }
 
-tell_active() {
-    local payload
+# aria2.getPeers 返回的 peerId 是百分号编码的（例如 %2DXL0300... 实际是 -XL0300...）。
+# 不解码直接拿编码后的串比前缀，永远匹配不上，防吸血会静默失效。
+url_decode() {
+    local s=$1 hex out=""
+    while [[ ${s} == *%* ]]; do
+        out+="${s%%\%*}"
+        s="${s#*%}"
+        hex="${s:0:2}"
+        if [[ ${hex} =~ ^[0-9A-Fa-f]{2}$ ]]; then
+            out+="$(printf "\\x${hex}")"
+            s="${s:2}"
+        else
+            out+="%"
+        fi
+    done
+    printf '%s' "${out}${s}"
+}
+
+# 同类告警只打一次，避免 RPC 故障时每 10 秒刷屏
+last_rpc_err=""
+log_once() {
+    [[ $1 == "${last_rpc_err}" ]] && return 0
+    last_rpc_err=$1
+    log "WARN: $1"
+}
+
+ACTIVE_GIDS=()
+declare -A ACTIVE_DOWNLOADING=()
+
+# 取当前活动任务的 gid 列表，结果放进全局数组 ACTIVE_GIDS；
+# 同时把"仍未下载完成"的任务记到 ACTIVE_DOWNLOADING，供只下不上判定使用。
+# 不能写成 mapfile < <(tell_active)：进程替换会开子 shell，
+# 告警去重用的 last_rpc_err 在子 shell 里改了带不回主循环，会每轮重复刷屏。
+scan_active() {
+    local payload raw err
     payload=$(jq -cn --arg s "token:${rpc_secret}" \
         '{jsonrpc:"2.0",id:"antileech",method:"aria2.tellActive",params:[$s]}')
-    rpc_call "${payload}" | jq -r '.result[]?.gid // empty' 2>/dev/null
+    raw=$(rpc_call "${payload}")
+    ACTIVE_GIDS=()
+    ACTIVE_DOWNLOADING=()
+    if [[ -z ${raw} ]]; then
+        log_once "RPC 无响应（port=${rpc_port}），检查 aria2 是否运行、rpc-listen-port 是否正确"
+        return 1
+    fi
+    err=$(printf '%s' "${raw}" | jq -r '.error.message // empty' 2>/dev/null)
+    if [[ -n ${err} ]]; then
+        log_once "RPC 返回错误: ${err}（检查 rpc-secret 是否与 aria2.conf 一致）"
+        return 1
+    fi
+    last_rpc_err=""
+    local line
+    mapfile -t ACTIVE_GIDS < <(printf '%s' "${raw}" | jq -r '.result[]?.gid // empty' 2>/dev/null)
+    while IFS= read -r line; do
+        [[ -n ${line} ]] && ACTIVE_DOWNLOADING[${line}]=1
+    done < <(printf '%s' "${raw}" | jq -r '
+        .result[]?
+        | select(((.totalLength|tonumber) > 0) and ((.completedLength|tonumber) < (.totalLength|tonumber)))
+        | .gid' 2>/dev/null)
+    return 0
 }
 
 get_peers() {
@@ -145,7 +225,7 @@ get_peers() {
     payload=$(jq -cn --arg s "token:${rpc_secret}" --arg g "${gid}" \
         '{jsonrpc:"2.0",id:"antileech",method:"aria2.getPeers",params:[$s,$g]}')
     rpc_call "${payload}" |
-        jq -r '.result[]? | [.peerId, .ip, (.port|tostring), (.seeder|tostring), (.uploadSpeed|tostring)] | @tsv' 2>/dev/null
+        jq -r '.result[]? | [.peerId, .ip, (.port|tostring), (.seeder|tostring), (.uploadSpeed|tostring), (.downloadSpeed|tostring)] | @tsv' 2>/dev/null
 }
 
 # 生成 ipset 条目 key：ip 模式用 IP，ipport 模式用 "IP,tcp:PORT"
@@ -179,12 +259,72 @@ block_peer() {
     fi
 }
 
+# ==================== 只下不上判定 ====================
+# getPeers 只提供瞬时速度，没有累计字节数，只能按轮询间隔把速度积分成流量。
+# 状态按出口 IP 聚合：多个 peer 共用同一 IP（CGNAT/机房）时合并统计，
+# 与 iptables 按 IP 封禁的粒度一致。
+declare -A RG_IN=() RG_OUT=() RG_FIRST=() RG_LAST=() RG_PORT=()
+
+RG_RESET() {
+    unset "RG_IN[$1]" "RG_OUT[$1]" "RG_FIRST[$1]" "RG_LAST[$1]" "RG_PORT[$1]"
+}
+
+ratio_accum() {
+    local ip=$1 port=$2 down=$3 up=$4 now=$5
+    [[ ${ip} =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 0
+    [[ ${down} =~ ^[0-9]+$ ]] || down=0
+    [[ ${up} =~ ^[0-9]+$ ]] || up=0
+    [[ -z ${RG_FIRST[${ip}]:-} ]] && RG_FIRST[${ip}]=${now}
+    RG_LAST[${ip}]=${now}
+    [[ ${port} =~ ^[0-9]+$ ]] && RG_PORT[${ip}]=${port}
+    RG_IN[${ip}]=$(( ${RG_IN[${ip}]:-0} + down * POLL_INTERVAL ))
+    RG_OUT[${ip}]=$(( ${RG_OUT[${ip}]:-0} + up * POLL_INTERVAL ))
+}
+
+# 窗口到期且我方累计上传量达标时，按比例判定；返回 0 表示已封禁
+ratio_eval() {
+    local ip=$1 now=$2 first in out
+    first=${RG_FIRST[${ip}]:-}
+    [[ -z ${first} ]] && return 1
+    (( now - first >= RATIO_WINDOW )) || return 1
+    out=${RG_OUT[${ip}]:-0}
+    # 传得太少不足以说明问题，继续累计，不判定
+    (( out >= RATIO_MIN_UPLOAD )) || return 1
+    in=${RG_IN[${ip}]:-0}
+    if (( in * 100 < out * RATIO_MIN_IN_PERCENT )); then
+        block_peer "${ip}" "${RG_PORT[${ip}]:-}" "ratio in=${in} out=${out} ${RATIO_WINDOW}s"
+        RG_RESET "${ip}"
+        return 0
+    fi
+    # 比例健康：结束本窗口重新累计，便于发现后转吸血的 peer
+    RG_RESET "${ip}"
+    return 1
+}
+
+# 清理长时间没出现的 peer，避免状态表无限增长
+ratio_gc() {
+    local ip now=$1
+    for ip in "${!RG_LAST[@]}"; do
+        (( now - RG_LAST[${ip}] > RATIO_WINDOW * 2 )) && RG_RESET "${ip}"
+    done
+}
+
 while true; do
-    mapfile -t gids < <(tell_active)
-    for gid in "${gids[@]}"; do
-        while IFS=$'\t' read -r pid ip port seeder up; do
-            [[ -z ${pid:-} || -z ${ip:-} ]] && continue
-            pid_lc=${pid,,}
+    scan_active
+    now=$(date +%s)
+    for gid in "${ACTIVE_GIDS[@]}"; do
+        downloading=${ACTIVE_DOWNLOADING[${gid}]:-0}
+        while IFS=$'\t' read -r pid ip port seeder up down; do
+            [[ -z ${ip:-} ]] && continue
+            # 只下不上判定：只在本任务还没下完时评估。
+            # 自己已完成（做种中）时所有 peer 都不会回传，评估会把整个 swarm 封掉。
+            if [[ ${RATIO_GUARD} == 1 && ${downloading} == 1 ]]; then
+                ratio_accum "${ip}" "${port}" "${down:-0}" "${up:-0}" "${now}"
+                ratio_eval "${ip}" "${now}" && continue
+            fi
+            [[ -z ${pid:-} ]] && continue
+            pid_dec=$(url_decode "${pid}")
+            pid_lc=${pid_dec,,}
             matched=""
             for p in ${LEECH_PREFIXES}; do
                 if [[ ${pid_lc} == "${p,,}"* ]]; then matched=${p}; break; fi
@@ -192,9 +332,20 @@ while true; do
             [[ -z ${matched} ]] && continue
             # 默认放行做种者：迅雷偶尔也会上传，做种的对我们有利
             [[ ${BLOCK_SEEDERS} == 0 && ${seeder} == "true" ]] && continue
-            block_peer "${ip}" "${port}" "peerId=${pid:0:8}"
+            # 正在给我方传数据的 peer 放行：它此刻是有用的源，不是纯吸血。
+            # 迅雷常一边大量下载一边回传，只按 peerId 一刀切会误伤。
+            if [[ ${MIN_DOWNLOAD_SPEED} =~ ^[0-9]+$ ]] && ((MIN_DOWNLOAD_SPEED > 0)) &&
+                [[ ${down:-0} =~ ^[0-9]+$ ]] && ((down >= MIN_DOWNLOAD_SPEED)); then
+                if [[ ${DRY_RUN} == 1 && -z ${SKIP_SEEN[${ip}:${port}]:-} ]]; then
+                    SKIP_SEEN["${ip}:${port}"]=1
+                    log "skip ${ip}:${port} (peerId=${pid_dec:0:8}) 正在下载 ${down} B/s"
+                fi
+                continue
+            fi
+            block_peer "${ip}" "${port}" "peerId=${pid_dec:0:8}"
         done < <(get_peers "${gid}")
     done
+    [[ ${RATIO_GUARD} == 1 ]] && ratio_gc "${now}"
     # 放到后台再 wait：收到 TERM 时能立即打断 sleep 执行清理，
     # 否则要等 sleep 跑完（最多 POLL_INTERVAL 秒）才处理信号。
     sleep "${POLL_INTERVAL}" &
