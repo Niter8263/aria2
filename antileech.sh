@@ -338,7 +338,7 @@ while true; do
                 [[ ${down:-0} =~ ^[0-9]+$ ]] && ((down >= MIN_DOWNLOAD_SPEED)); then
                 if [[ ${DRY_RUN} == 1 && -z ${SKIP_SEEN[${ip}:${port}]:-} ]]; then
                     SKIP_SEEN["${ip}:${port}"]=1
-                    log "skip ${ip}:${port} (peerId=${pid_dec:0:8}) 正在下载 ${down} B/s"
+                    log "skip ${ip}:${port} (peerId=${pid_dec:0:8}) 对方回传 ${down} B/s"
                 fi
                 continue
             fi

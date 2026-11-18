@@ -784,6 +784,35 @@ Set_move_on_complete() {
     echo -e "${Info} 已开启：下载完成后移动到 ${Green_font_prefix}${new_dest}${Font_color_suffix}"
     Restart_aria2
 }
+# 字节数转可读单位（1024 进制），用于菜单显示
+fmt_size() {
+    local n=${1:-0}
+    [[ ${n} =~ ^[0-9]+$ ]] || { echo "${n}"; return 0; }
+    if ((n >= 1073741824)); then
+        printf '%dG' $((n / 1073741824))
+    elif ((n >= 1048576)); then
+        printf '%dM' $((n / 1048576))
+    elif ((n >= 1024)); then
+        printf '%dK' $((n / 1024))
+    else
+        printf '%dB' "${n}"
+    fi
+}
+
+# 可读单位转字节：支持 100M / 512K / 1G（大小写均可），纯数字按字节处理
+parse_size() {
+    local s=${1,,} num unit
+    [[ ${s} =~ ^([0-9]+)([kmg]?)b?$ ]] || return 1
+    num=${BASH_REMATCH[1]}
+    unit=${BASH_REMATCH[2]}
+    case ${unit} in
+    k) printf '%d' $((num * 1024)) ;;
+    m) printf '%d' $((num * 1048576)) ;;
+    g) printf '%d' $((num * 1073741824)) ;;
+    *) printf '%d' "${num}" ;;
+    esac
+}
+
 antileech_conf_get() {
     local key=$1 default=$2 v=""
     if [[ -r ${antileech_conf} ]]; then
@@ -960,12 +989,12 @@ Show_antileech() {
     if [[ ${mds_show} == "0" ]]; then
         echo -e "   活跃放行: 关闭（只看 peerId 前缀）"
     else
-        echo -e "   活跃放行: 下载速度 >= ${mds_show} B/s 的 peer 不封"
+        echo -e "   活跃放行: 对方回传 >= $(fmt_size "${mds_show}")/s 的 peer 不封"
     fi
     rg_show=$(antileech_conf_get RATIO_GUARD 0)
     if [[ ${rg_show} == "1" ]]; then
         echo -e "   只下不上: 开启（窗口 $(antileech_conf_get RATIO_WINDOW 600) 秒，" \
-            "我方上传 >= $(antileech_conf_get RATIO_MIN_UPLOAD 104857600) 字节且回传 <" \
+            "我方上传 >= $(fmt_size "$(antileech_conf_get RATIO_MIN_UPLOAD 104857600)") 且回传 <" \
             "$(antileech_conf_get RATIO_MIN_IN_PERCENT 5)% 时封禁）"
     else
         echo -e "   只下不上: 关闭"
@@ -1014,12 +1043,19 @@ Edit_antileech_config() {
     read -e -p " 永不封禁的地址(逗号分隔，留空不排除) [${ex}]: " v; [[ -n ${v} ]] && ex=${v}
     echo -e " ${Tip} 活跃放行：带宽阈值内的下载说明该 peer 正在给我传数据，不应封禁"
     echo -e " ${Tip} 填 0 关闭该保护（只看 peerId 前缀，可能误封正在上传的迅雷）"
-    read -e -p " 活跃下载放行阈值(字节/秒) [${mds}]: " v; [[ -n ${v} ]] && mds=${v}
+    echo -e " ${Tip} 支持 1K / 512K / 1M 写法，直接回车保留当前值"
+    read -e -p " 对方回传放行阈值 [$(fmt_size "${mds}")/s]: " v
+    if [[ -n ${v} ]]; then
+        mds=$(parse_size "${v}") || { echo -e "${Error} 无法识别的数值: ${v}（可写 512K 或纯数字）"; return 1; }
+    fi
     echo -e " ${Tip} 只下不上：不看客户端名，按\"我方上传给它 / 它下载给我\"的累计比例判定"
     echo -e " ${Tip} 只在我们仍在下载的任务上评估，自己做种时自动跳过"
     read -e -p " 开启只下不上判定 0/1 [${rg}]: " v; [[ -n ${v} ]] && rg=${v}
     read -e -p " 观察窗口(秒) [${rw}]: " v; [[ -n ${v} ]] && rw=${v}
-    read -e -p " 窗口内最少上传字节数 [${ru}]: " v; [[ -n ${v} ]] && ru=${v}
+    read -e -p " 窗口内最少上传量 [$(fmt_size "${ru}")]: " v
+    if [[ -n ${v} ]]; then
+        ru=$(parse_size "${v}") || { echo -e "${Error} 无法识别的容量: ${v}（可写 100M 或纯数字）"; return 1; }
+    fi
     read -e -p " 回传比例下限(%) [${rp}]: " v; [[ -n ${v} ]] && rp=${v}
 
     [[ ${bt} =~ ^[0-9]+$ ]] || { echo -e "${Error} 封禁时长必须是数字"; return 1; }
