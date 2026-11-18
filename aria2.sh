@@ -12,7 +12,7 @@
 # Version: 2.7.5
 #
 
-sh_ver="2.7.7"
+sh_ver="2.7.8"
 # 脚本自身绝对路径。Download_aria2_conf 里有 cd 操作，之后再用 $0 是相对路径会解析错位置。
 self_path="$(readlink -f "$0" 2>/dev/null)"
 [[ -n ${self_path} ]] || self_path="$0"
@@ -108,7 +108,7 @@ check_crontab_installed_status() {
         if [[ ${release} == "centos" ]]; then
             yum install crond -y
         else
-            apt-get install cron -y
+            apt_run install cron -y
         fi
         if [[ ! -e ${Crontab_file} ]]; then
             echo -e "${Error} Crontab 安装失败，请检查！" && exit 1
@@ -476,14 +476,24 @@ Service_aria2_sysv() {
     dl_install /etc/init.d/aria2c "$(gh_raw_url "service/aria2c")"
     echo -e "${Info} Aria2服务 管理脚本下载完成 !"
 }
+# apt 非交互执行：
+#   DEBIAN_FRONTEND=noninteractive 避免 tzdata 之类的配置询问
+#   NEEDRESTART_SUSPEND=1          新版 needrestart 直接跳过（不弹全屏对话框、不自动重启服务）
+#   NEEDRESTART_MODE=l             旧版 needrestart 的兜底：只列出，不交互也不重启
+#   --force-confdef/--force-confold 升级已有包时保留本地配置，不中断询问
+apt_run() {
+    DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1 NEEDRESTART_MODE=l \
+        apt-get -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold "$@"
+}
+
 Installation_dependency() {
     if [[ ${release} = "centos" ]]; then
         # 仅刷新元数据，不做全系统升级（yum update 可能升级内核/关键组件，影响生产环境）
         yum makecache
         yum install -y wget curl nano ca-certificates findutils jq tar gzip dpkg ipset
     else
-        apt-get update
-        apt-get install -y wget curl nano ca-certificates findutils jq tar gzip dpkg ipset
+        apt_run update
+        apt_run install -y wget curl nano ca-certificates findutils jq tar gzip dpkg ipset
     fi
 }
 Install_aria2() {
@@ -859,8 +869,8 @@ ensure_ipset() {
     if [[ ${release} = "centos" ]]; then
         yum install -y ipset >/dev/null 2>&1
     else
-        apt-get update -qq >/dev/null 2>&1
-        apt-get install -y -qq ipset >/dev/null 2>&1
+        apt_run update -qq >/dev/null 2>&1
+        apt_run install -y -qq ipset >/dev/null 2>&1
     fi
     command -v ipset >/dev/null 2>&1
 }
