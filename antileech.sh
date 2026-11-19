@@ -160,6 +160,7 @@ else
 fi
 
 log "started: set=${IPSET_NAME} type=${set_type} mode=${BLOCK_MODE} timeout=${BLOCK_TIMEOUT}s poll=${POLL_INTERVAL}s min-dl=${MIN_DOWNLOAD_SPEED}B/s prefix-window=${PREFIX_WINDOW}s prefixes='${LEECH_PREFIXES}'"
+log "ratio-guard=${RATIO_GUARD} ratio-window=${RATIO_MIN_WINDOW}s ratio-min-upload=${RATIO_MIN_UPLOAD}B ratio-in=${RATIO_MIN_IN_PERCENT}%"
 [[ -n ${EXCLUDE_IPS} ]] && log "exclude: ${EXCLUDE_IPS}"
 
 rpc_call() {
