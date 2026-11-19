@@ -40,7 +40,8 @@
 #   不看客户端名，按"我方上传给它 / 它下载给我"的累计比例识别纯吸血。
 #   只在我们确实还在下载的任务上评估；任务已完成（我们自己就是做种者）时跳过，
 #   否则所有 peer 都会因为不需要回传而命中。
-#   RATIO_WINDOW        观察窗口秒数，默认 600（10 分钟）
+#   RATIO_MIN_WINDOW    判定前的最短观察秒数，默认 120
+#                       累计上传量一旦达到 RATIO_MIN_UPLOAD 即可判定，不固定等满窗口
 #   RATIO_MIN_UPLOAD    窗口内我方至少给它传了这么多字节才判定，默认 104857600（100MB）
 #   RATIO_MIN_IN_PERCENT 它给我的不足我给它的百分之几就判为吸血，默认 5
 #   注意：多个 peer 共用一个出口 IP（CGNAT/机房）时状态会合并计算，
@@ -66,7 +67,8 @@ PREFIX_WINDOW="${PREFIX_WINDOW:-600}"
 [[ ${PREFIX_WINDOW} =~ ^[0-9]+$ ]] || PREFIX_WINDOW=600
 # 只下不上判定：0=关闭，1=启用
 RATIO_GUARD="${RATIO_GUARD:-0}"
-RATIO_WINDOW="${RATIO_WINDOW:-600}"
+RATIO_MIN_WINDOW="${RATIO_MIN_WINDOW:-120}"
+[[ ${RATIO_MIN_WINDOW} =~ ^[0-9]+$ ]] || RATIO_MIN_WINDOW=120
 RATIO_MIN_UPLOAD="${RATIO_MIN_UPLOAD:-104857600}"
 RATIO_MIN_IN_PERCENT="${RATIO_MIN_IN_PERCENT:-5}"
 RPC_TIMEOUT="${RPC_TIMEOUT:-5}"
@@ -289,22 +291,24 @@ ratio_accum() {
     RG_OUT[${ip}]=$(( ${RG_OUT[${ip}]:-0} + up * POLL_INTERVAL ))
 }
 
-# 窗口到期且我方累计上传量达标时，按比例判定；返回 0 表示已封禁
+# 观察满最短时长、且累计上传量达标时按比例判定；返回 0 表示已封禁。
+# 按量触发而不是按时间等待：快速吸血者上传量很快达标，不必白等到窗口结束。
 ratio_eval() {
-    local ip=$1 now=$2 first in out
+    local ip=$1 now=$2 first in out elapsed
     first=${RG_FIRST[${ip}]:-}
     [[ -z ${first} ]] && return 1
-    (( now - first >= RATIO_WINDOW )) || return 1
+    elapsed=$(( now - first ))
+    (( elapsed >= RATIO_MIN_WINDOW )) || return 1
     out=${RG_OUT[${ip}]:-0}
     # 传得太少不足以说明问题，继续累计，不判定
     (( out >= RATIO_MIN_UPLOAD )) || return 1
     in=${RG_IN[${ip}]:-0}
     if (( in * 100 < out * RATIO_MIN_IN_PERCENT )); then
-        block_peer "${ip}" "${RG_PORT[${ip}]:-}" "ratio in=${in} out=${out} ${RATIO_WINDOW}s"
+        block_peer "${ip}" "${RG_PORT[${ip}]:-}" "ratio in=${in} out=${out} ${elapsed}s"
         RG_RESET "${ip}"
         return 0
     fi
-    # 比例健康：结束本窗口重新累计，便于发现后转吸血的 peer
+    # 比例健康：结束本轮重新累计，便于发现后转吸血的 peer
     RG_RESET "${ip}"
     return 1
 }
@@ -313,7 +317,7 @@ ratio_eval() {
 ratio_gc() {
     local ip now=$1
     for ip in "${!RG_LAST[@]}"; do
-        (( now - RG_LAST[${ip}] > RATIO_WINDOW * 2 )) && RG_RESET "${ip}"
+        (( now - RG_LAST[${ip}] > RATIO_MIN_WINDOW * 10 )) && RG_RESET "${ip}"
     done
 }
 

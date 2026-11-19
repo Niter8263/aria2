@@ -856,36 +856,23 @@ MIN_DOWNLOAD_SPEED=${mds}
 PREFIX_WINDOW=${pw}
 # 只下不上判定：不看客户端名，按"我方上传 / 它下载给我"的累计比例识别纯吸血
 RATIO_GUARD=${rg}
-RATIO_WINDOW=${rw}
+# 判定前的最短观察秒数；累计上传量达到 RATIO_MIN_UPLOAD 即可判定，不固定等满
+RATIO_MIN_WINDOW=${rw}
 RATIO_MIN_UPLOAD=${ru}
 RATIO_MIN_IN_PERCENT=${rp}
 CONF
     chmod 600 "${antileech_conf}"
 }
+# 配置只在文件缺失时生成默认值。升级方式是整体替换脚本文件，
+# 不需要在旧配置上补字段——antileech.sh 里每个变量都有默认值，缺项照常运行。
 antileech_ensure_conf() {
-    local key
-    if [[ -e ${antileech_conf} ]]; then
-        # 旧版本配置缺少新字段时补齐默认值，避免升级后行为不一致
-        for key in BLOCK_MODE=ip EXCLUDE_IPS='""' MIN_DOWNLOAD_SPEED=1024 \
-            RATIO_GUARD=0 RATIO_WINDOW=600 RATIO_MIN_UPLOAD=104857600 RATIO_MIN_IN_PERCENT=5 \
-            PREFIX_WINDOW=600; do
-            grep -qE "^${key%%=*}=" "${antileech_conf}" 2>/dev/null ||
-                echo "${key}" >>"${antileech_conf}"
-        done
-        return 0
-    fi
-    # 从旧路径迁移已有配置，避免升级后配置丢失
+    [[ -e ${antileech_conf} ]] && return 0
+    # 极早期版本把配置放在 /etc/aria2-antileech.conf，文件还在就挪过来，避免设置丢失
     if [[ -e ${antileech_legacy_conf} ]]; then
         mv -f "${antileech_legacy_conf}" "${antileech_conf}"
-        for key in BLOCK_MODE=ip EXCLUDE_IPS='""' MIN_DOWNLOAD_SPEED=1024 \
-            RATIO_GUARD=0 RATIO_WINDOW=600 RATIO_MIN_UPLOAD=104857600 RATIO_MIN_IN_PERCENT=5 \
-            PREFIX_WINDOW=600; do
-            grep -qE "^${key%%=*}=" "${antileech_conf}" 2>/dev/null ||
-                echo "${key}" >>"${antileech_conf}"
-        done
-    else
-        antileech_write_conf 3600 10 0 0 INPUT 0 "-XL -SD -QD -TX -QQ" ip "" 1024 0 600 104857600 5 600
+        return 0
     fi
+    antileech_write_conf 3600 10 0 0 INPUT 0 "-XL -SD -QD -TX -QQ" ip "" 1024 0 120 104857600 5 600
 }
 antileech_status() {
     if [[ ! -e ${antileech_unit} ]]; then
@@ -1004,8 +991,8 @@ Show_antileech() {
     fi
     rg_show=$(antileech_conf_get RATIO_GUARD 0)
     if [[ ${rg_show} == "1" ]]; then
-        echo -e "   只下不上: 开启（窗口 $(antileech_conf_get RATIO_WINDOW 600) 秒，" \
-            "我方上传 >= $(fmt_size "$(antileech_conf_get RATIO_MIN_UPLOAD 104857600)") 且回传 <" \
+        echo -e "   只下不上: 开启（观察 >= $(antileech_conf_get RATIO_MIN_WINDOW 120) 秒，我方上传 >=" \
+            "$(fmt_size "$(antileech_conf_get RATIO_MIN_UPLOAD 104857600)") 且回传 <" \
             "$(antileech_conf_get RATIO_MIN_IN_PERCENT 5)% 时封禁）"
     else
         echo -e "   只下不上: 关闭"
@@ -1041,7 +1028,7 @@ Edit_antileech_config() {
     ex=$(antileech_conf_get EXCLUDE_IPS "")
     mds=$(antileech_conf_get MIN_DOWNLOAD_SPEED 1024)
     rg=$(antileech_conf_get RATIO_GUARD 0)
-    rw=$(antileech_conf_get RATIO_WINDOW 600)
+    rw=$(antileech_conf_get RATIO_MIN_WINDOW 120)
     ru=$(antileech_conf_get RATIO_MIN_UPLOAD 104857600)
     rp=$(antileech_conf_get RATIO_MIN_IN_PERCENT 5)
     pw=$(antileech_conf_get PREFIX_WINDOW 600)
@@ -1071,7 +1058,8 @@ Edit_antileech_config() {
     echo -e " ${Tip} 只下不上：不看客户端名，按\"我方上传给它 / 它下载给我\"的累计比例判定"
     echo -e " ${Tip} 只在我们仍在下载的任务上评估，自己做种时自动跳过"
     read -e -p " 开启只下不上判定 0/1 [${rg}]: " v; [[ -n ${v} ]] && rg=${v}
-    read -e -p " 观察窗口(秒) [${rw}]: " v; [[ -n ${v} ]] && rw=${v}
+    echo -e " ${Tip} 累计上传量达到下面的阈值就判定，这里只是最短观察时间"
+    read -e -p " 最短观察时长(秒) [${rw}]: " v; [[ -n ${v} ]] && rw=${v}
     read -e -p " 窗口内最少上传量 [$(fmt_size "${ru}")]: " v
     if [[ -n ${v} ]]; then
         ru=$(parse_size "${v}") || { echo -e "${Error} 无法识别的容量: ${v}（可写 100M 或纯数字）"; return 1; }
@@ -1087,7 +1075,7 @@ Edit_antileech_config() {
     [[ ${bm} == "ip" || ${bm} == "ipport" ]] || { echo -e "${Error} 封禁粒度只能是 ip 或 ipport"; return 1; }
     [[ ${mds} =~ ^[0-9]+$ ]] || { echo -e "${Error} 活跃下载放行阈值必须是非负整数"; return 1; }
     [[ ${rg} =~ ^[01]$ ]] || { echo -e "${Error} 只下不上判定只能是 0 或 1"; return 1; }
-    [[ ${rw} =~ ^[0-9]+$ ]] || { echo -e "${Error} 观察窗口必须是数字"; return 1; }
+    [[ ${rw} =~ ^[0-9]+$ ]] || { echo -e "${Error} 最短观察时长必须是数字"; return 1; }
     [[ ${ru} =~ ^[0-9]+$ ]] || { echo -e "${Error} 最少上传字节数必须是数字"; return 1; }
     [[ ${rp} =~ ^[0-9]+$ ]] || { echo -e "${Error} 回传比例下限必须是数字"; return 1; }
     ((rp <= 100)) || { echo -e "${Error} 回传比例下限不能超过 100"; return 1; }
